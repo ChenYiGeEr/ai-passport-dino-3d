@@ -1,0 +1,27 @@
+# --- 目标芯片 ---
+CONFIG_IDF_TARGET="esp32c3"
+# 注:ESP32-C3 无 PSRAM,故不设 CONFIG_SPIRAM。
+
+# --- Flash ---
+# 8MB Flash 基线(与 ai-passport 产品一致)。
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# 固定 8MB 镜像头,关闭 detect,便于 idf.py merge-bin。
+CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
+# 3 MB 应用上限;分区表保留 cardid@0x356000,不得移动或覆盖。
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- 控制台:USB-Serial-JTAG(C3 原生 USB,GPIO18/19)---
+# 不用 UART0:其默认 TX=GPIO21 与本板背光引脚冲突。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- 系统 ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- 蓝牙关闭:游戏不需要,关掉省 RAM 与固件体积 ---
+CONFIG_BT_ENABLED=n
+
+# --- 固件体积优化 ---
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
