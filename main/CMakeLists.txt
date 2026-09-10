@@ -3,6 +3,7 @@ idf_component_register(
          "game.c"
          "day_cycle.c"
          "dust.c"
+         "idle_sleep.c"
          "player.c"
          "obstacles.c"
          "scenery.c"

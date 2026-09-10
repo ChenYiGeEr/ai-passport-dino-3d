@@ -3,7 +3,7 @@
  * bake_sprites.js — 把 dino3d 的 .vox 体素模型烘焙成 C 精灵表。
  *
  * 输入: /Users/lim/code/GitHub/dino3d/objects/... 下的 .vox 文件
- * 输出: main/sprites.h + main/sprites.c (8bpp 调色板索引像素, RGB565 日/夜双调色板)
+ * 输出: main/sprites.h + main/sprites.c (16bpp RGB565, 运行时统一叠加夜色)
  * 另外输出 /tmp/sprites-preview.ppm 供人工检查烘焙效果。
  *
  * 用法: node tools/bake_sprites.js
@@ -89,6 +89,24 @@ function shade(c, f) {
     };
 }
 
+// T-Rex 源模型的三档绿色材质在所有动作帧中共用这些索引。
+// 只替换材质色，不动近黑眼睛和死亡帧的白色细节。
+function recolorDino(model) {
+    const palette = model.palette.map(c => ({ ...c }));
+    const set = (index, hex) => {
+        palette[index - 1] = {
+            r: (hex >> 16) & 0xff,
+            g: (hex >> 8) & 0xff,
+            b: hex & 0xff,
+        };
+    };
+    set(249, 0xB98236); // 主体赭黄
+    set(251, 0xA66F30); // 次级焦糖棕
+    set(217, 0x6F4825); // 暗面深土棕
+    set(241, 0x6F4825); // 同一暗面在部分动作帧使用另一索引
+    return { ...model, palette };
+}
+
 function renderSprite(model, k) {
     k = k || K;
     const occ = new Set(model.voxels.map(v => v.x + ',' + v.y + ',' + v.z));
@@ -161,6 +179,13 @@ for (let i = 0; i <= 4; i++) MODELS.push({ name: `rock_${i}`, file: `rocks/${i}.
 for (let i = 0; i <= 2; i++) MODELS.push({ name: `flower_${i}`, file: `flowers/${i}.vox` });
 MODELS.push({ name: 'skull', file: 'misc/desert_skull.vox' });
 MODELS.push({ name: 'scorpion', file: 'misc/scorpion.vox' });
+// 跑道纵深层：远层 K=1，近层只选少量石块/花草 K=3，控制 flash 和合成成本。
+for (const [n, f] of [['rock_far_0', 'rocks/0.vox'], ['rock_far_2', 'rocks/2.vox'],
+                      ['flower_far_0', 'flowers/0.vox'], ['flower_far_2', 'flowers/2.vox']])
+    MODELS.push({ name: n, file: f, k: 1 });
+for (const [n, f] of [['rock_near_0', 'rocks/0.vox'], ['rock_near_2', 'rocks/2.vox'],
+                      ['flower_near_0', 'flowers/0.vox'], ['flower_near_2', 'flowers/2.vox']])
+    MODELS.push({ name: n, file: f, k: 3 });
 // tumbleweed 在下方单独扩成 8 个离线旋转帧。
 // 远景元素(K=1 小号, 放在远河岸/天边, 纯装饰不碰撞)
 MODELS.push({ name: 'tree_green_far', file: 'misc/trees/green.vox', k: 2 });
@@ -173,7 +198,8 @@ MODELS.push({ name: 'skull_far', file: 'misc/desert_skull.vox', k: 1 });
 /* ---------------- 烘焙(16bpp RGB565 直出, 已含方向性明暗) ---------------- */
 
 const models = MODELS.map(m => {
-    const model = parseVox(path.join(DINO3D, m.file));
+    let model = parseVox(path.join(DINO3D, m.file));
+    if (m.name.startsWith('dino_')) model = recolorDino(model);
     const sp = renderSprite(model, m.k);
     console.log(`${m.name}: ${sp.w}x${sp.h} (${m.file})`);
     return { name: m.name, w: sp.w, h: sp.h, px: sp.px };
@@ -272,6 +298,8 @@ console.log('wrote', OUT_H, 'and', OUT_C);
     blit(pick('tree_green_far'), 480, 200); blit(pick('tree_dead_far'), 540, 200);
     blit(pick('cactus_far_0'), 480, 260); blit(pick('cactus_far_1'), 510, 260); blit(pick('cactus_far_2'), 540, 260);
     blit(pick('skull_far'), 570, 260);
+    blit(pick('rock_far_0'), 10, 300); blit(pick('flower_far_0'), 35, 300);
+    blit(pick('rock_near_0'), 70, 300); blit(pick('flower_near_0'), 120, 300);
     fs.writeFileSync('/tmp/sprites-preview.ppm', Buffer.concat([Buffer.from(`P6\n${W} ${H}\n255\n`), img]));
     console.log('preview: /tmp/sprites-preview.ppm');
 }

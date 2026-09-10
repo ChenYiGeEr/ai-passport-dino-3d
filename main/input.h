@@ -37,3 +37,9 @@ game_key_t input_take_long(void);
 bool input_up_held(void);
 bool input_down_held(void);
 bool input_ok_held(void);
+
+// 当前按住的键；三键共用 ADC，同一时刻最多识别一个键。
+game_key_t input_held_key(void);
+
+// 丢弃尚未消费的 PRESS/CLICK/LONG，供息屏唤醒吞掉完整手势。
+void input_discard_events(void);

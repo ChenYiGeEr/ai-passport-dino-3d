@@ -8,11 +8,16 @@
 #define CLOUD_COUNT  3
 #define DECOR_COUNT  4
 #define FAR_COUNT    4
+#define GROUND_FAR_COUNT  3
+#define GROUND_NEAR_COUNT 2
 #define STAR_COUNT  14
 // 云的视差系数: 比地面慢, 营造远近层次
 #define CLOUD_PARALLAX 0.25f
 // 远景(树/小仙人掌)视差系数
 #define FAR_PARALLAX   0.45f
+#define GROUND_FAR_SPEED  0.45f
+#define GROUND_MID_SPEED  0.85f
+#define GROUND_NEAR_SPEED 1.20f
 
 typedef struct { float x, y; int w; } cloud_t;
 typedef struct {
@@ -20,16 +25,21 @@ typedef struct {
     float roll_distance;
     const sprite_t *spr;
     bool tumbleweed;
+    int anchor_y;
 } decor_t;
 typedef struct { float x, y; const sprite_t *spr; } far_t;
+typedef struct { float x; int anchor_y; const sprite_t *spr; } depth_decor_t;
 typedef struct { uint16_t x; uint8_t y, reveal, period, phase; } star_t;
 
 static cloud_t s_clouds[CLOUD_COUNT];
 static decor_t s_decor[DECOR_COUNT];
 static far_t s_far[FAR_COUNT];
+static depth_decor_t s_ground_far[GROUND_FAR_COUNT];
+static depth_decor_t s_ground_near[GROUND_NEAR_COUNT];
 static int s_ground_y;
 static int s_far_top, s_far_bottom; // 远河岸纵向范围
-static float s_speckle_off; // 地面斑点滚动偏移
+static int s_field_y;
+static float s_speckle_off[3];
 
 static const star_t STARS[STAR_COUNT] = {
     { 55, 18, 52, 11, 1 }, { 82, 45, 58, 13, 7 }, { 108, 27, 64, 17, 5 },
@@ -62,6 +72,18 @@ static const sprite_t *FAR_SPRITES[] = {
 };
 #define FAR_SPRITE_COUNT 6
 
+static const sprite_t *GROUND_FAR_SPRITES[] = {
+    &spr_rock_far_0, &spr_rock_far_2,
+    &spr_flower_far_0, &spr_flower_far_2,
+};
+#define GROUND_FAR_SPRITE_COUNT 4
+
+static const sprite_t *GROUND_NEAR_SPRITES[] = {
+    &spr_rock_near_0, &spr_rock_near_2,
+    &spr_flower_near_0, &spr_flower_near_2,
+};
+#define GROUND_NEAR_SPRITE_COUNT 4
+
 static void spawn_cloud(cloud_t *c, bool initial)
 {
     c->x = initial ? (float)(rand() % RENDER_SCREEN_W)
@@ -76,8 +98,24 @@ static void spawn_decor(decor_t *d, bool initial)
     d->tumbleweed = choice == DECOR_SPRITE_COUNT - 1;
     d->roll_distance = 0;
     d->spr = d->tumbleweed ? TUMBLEWEED_FRAMES[0] : DECOR_SPRITES[choice];
+    d->anchor_y = s_ground_y + 2 + rand() % 5;
     d->x = initial ? (float)(rand() % RENDER_SCREEN_W)
                    : (float)(RENDER_SCREEN_W + 20 + rand() % 120);
+}
+
+static void spawn_depth_decor(depth_decor_t *d, bool near, bool initial)
+{
+    const sprite_t *const *sprites = near ? GROUND_NEAR_SPRITES : GROUND_FAR_SPRITES;
+    int count = near ? GROUND_NEAR_SPRITE_COUNT : GROUND_FAR_SPRITE_COUNT;
+    d->spr = sprites[rand() % count];
+    d->x = initial ? (float)(rand() % RENDER_SCREEN_W)
+                   : (float)(RENDER_SCREEN_W + 30 + rand() % (near ? 180 : 120));
+    if (near) {
+        d->anchor_y = RENDER_SCREEN_H - 4 - rand() % 5;
+    } else {
+        int span = s_ground_y - s_field_y - 18;
+        d->anchor_y = s_field_y + 9 + (span > 0 ? rand() % span : 0);
+    }
 }
 
 static void spawn_far(far_t *f, bool initial)
@@ -90,14 +128,17 @@ static void spawn_far(far_t *f, bool initial)
     f->y = (float)(s_far_bottom - 2 - (rand() % 6));
 }
 
-void scenery_init(int ground_y, int far_top, int far_bottom)
+void scenery_init(int ground_y, int far_top, int far_bottom, int field_y)
 {
     s_ground_y = ground_y;
     s_far_top = far_top; (void)s_far_top; // 预留: 远景 y 目前只贴着 far_bottom
     s_far_bottom = far_bottom;
+    s_field_y = field_y;
     for (int i = 0; i < CLOUD_COUNT; i++) spawn_cloud(&s_clouds[i], true);
     for (int i = 0; i < DECOR_COUNT; i++) spawn_decor(&s_decor[i], true);
     for (int i = 0; i < FAR_COUNT; i++) spawn_far(&s_far[i], true);
+    for (int i = 0; i < GROUND_FAR_COUNT; i++) spawn_depth_decor(&s_ground_far[i], false, true);
+    for (int i = 0; i < GROUND_NEAR_COUNT; i++) spawn_depth_decor(&s_ground_near[i], true, true);
 }
 
 void scenery_reset(void)
@@ -105,7 +146,9 @@ void scenery_reset(void)
     for (int i = 0; i < CLOUD_COUNT; i++) spawn_cloud(&s_clouds[i], true);
     for (int i = 0; i < DECOR_COUNT; i++) spawn_decor(&s_decor[i], true);
     for (int i = 0; i < FAR_COUNT; i++) spawn_far(&s_far[i], true);
-    s_speckle_off = 0;
+    for (int i = 0; i < GROUND_FAR_COUNT; i++) spawn_depth_decor(&s_ground_far[i], false, true);
+    for (int i = 0; i < GROUND_NEAR_COUNT; i++) spawn_depth_decor(&s_ground_near[i], true, true);
+    for (int i = 0; i < 3; i++) s_speckle_off[i] = 0;
 }
 
 void scenery_update(float dt, float speed_px)
@@ -115,7 +158,8 @@ void scenery_update(float dt, float speed_px)
         if (s_clouds[i].x + s_clouds[i].w < -20) spawn_cloud(&s_clouds[i], false);
     }
     for (int i = 0; i < DECOR_COUNT; i++) {
-        float travel = speed_px * dt * (s_decor[i].tumbleweed ? TUMBLEWEED_SPEED : 1.0f);
+        float travel = speed_px * dt * (s_decor[i].tumbleweed
+                                        ? TUMBLEWEED_SPEED : GROUND_MID_SPEED);
         s_decor[i].x -= travel;
         if (s_decor[i].tumbleweed) {
             s_decor[i].roll_distance += travel;
@@ -129,8 +173,22 @@ void scenery_update(float dt, float speed_px)
         s_far[i].x -= speed_px * FAR_PARALLAX * dt;
         if (s_far[i].x + s_far[i].spr->w < -20) spawn_far(&s_far[i], false);
     }
-    s_speckle_off += speed_px * dt;
-    if (s_speckle_off >= 8) s_speckle_off -= 8; // 斑点图案周期 8px
+    for (int i = 0; i < GROUND_FAR_COUNT; i++) {
+        depth_decor_t *d = &s_ground_far[i];
+        d->x -= speed_px * GROUND_FAR_SPEED * dt;
+        if (d->x + d->spr->w < -12) spawn_depth_decor(d, false, false);
+    }
+    for (int i = 0; i < GROUND_NEAR_COUNT; i++) {
+        depth_decor_t *d = &s_ground_near[i];
+        d->x -= speed_px * GROUND_NEAR_SPEED * dt;
+        if (d->x + d->spr->w < -20) spawn_depth_decor(d, true, false);
+    }
+    const float speeds[3] = { GROUND_FAR_SPEED, GROUND_MID_SPEED, GROUND_NEAR_SPEED };
+    for (int i = 0; i < 3; i++) {
+        s_speckle_off[i] += speed_px * speeds[i] * dt;
+        while (s_speckle_off[i] >= RENDER_SCREEN_W + 32)
+            s_speckle_off[i] -= RENDER_SCREEN_W + 32;
+    }
 }
 
 void scenery_draw_sky(uint16_t cloud_color, uint16_t star_dim,
@@ -170,16 +228,34 @@ void scenery_draw_far(void)
     }
 }
 
-void scenery_draw_ground(uint16_t speckle_color)
+static void draw_speckle_band(int count, int spacing, int y0, int y_span,
+                              int w, int h, float offset, uint16_t color)
 {
-    // 地面斑点: 随速度滚动的小点, 营造地面移动感
-    for (int i = 0; i < 14; i++) {
-        int x = ((i * 53) - (int)s_speckle_off * 7) % (RENDER_SCREEN_W + 16);
-        if (x < 0) x += RENDER_SCREEN_W + 16;
-        int y = s_ground_y + 6 + (i * 7) % (RENDER_SCREEN_H - s_ground_y - 12);
-        render_fill_rect(x, y, 3, 2, speckle_color);
+    int period = RENDER_SCREEN_W + 32;
+    for (int i = 0; i < count; i++) {
+        int x = (i * spacing - (int)offset) % period;
+        if (x < 0) x += period;
+        int y = y0 + (i * 7) % y_span;
+        render_fill_rect(x, y, w, h, color);
     }
-    // 地面装饰精灵
+}
+
+void scenery_draw_ground_back(uint16_t speckle_color)
+{
+    // 越靠近镜头，颗粒越大且移动越快。
+    draw_speckle_band(9, 43, s_field_y + 4, s_ground_y - s_field_y - 9,
+                      1, 1, s_speckle_off[0], speckle_color);
+    draw_speckle_band(11, 37, s_ground_y + 4, 17,
+                      3, 2, s_speckle_off[1], speckle_color);
+    draw_speckle_band(8, 51, s_ground_y + 22, 11,
+                      5, 3, s_speckle_off[2], speckle_color);
+
+    for (int i = 0; i < GROUND_FAR_COUNT; i++) {
+        depth_decor_t *d = &s_ground_far[i];
+        render_sprite(d->spr, (int)d->x, d->anchor_y - d->spr->h / 2);
+    }
+
+    // 中景装饰仍位于玩法精灵之后；风滚草保留 K=2 的8帧滚动。
     for (int i = 0; i < DECOR_COUNT; i++) {
         decor_t *d = &s_decor[i];
         int bounce = 0;
@@ -189,7 +265,14 @@ void scenery_draw_ground(uint16_t speckle_color)
             static const uint8_t BOUNCE[8] = { 0, 1, 2, 1, 0, 1, 2, 1 };
             bounce = BOUNCE[frame];
         }
-        render_sprite(d->spr, (int)d->x,
-                      s_ground_y + 4 - d->spr->h / 2 - bounce);
+        render_sprite(d->spr, (int)d->x, d->anchor_y - d->spr->h / 2 - bounce);
+    }
+}
+
+void scenery_draw_ground_front(void)
+{
+    for (int i = 0; i < GROUND_NEAR_COUNT; i++) {
+        depth_decor_t *d = &s_ground_near[i];
+        render_sprite(d->spr, (int)d->x, d->anchor_y - d->spr->h / 2);
     }
 }

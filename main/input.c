@@ -62,3 +62,15 @@ game_key_t input_take_long(void)
 bool input_up_held(void)   { return key_from_mv(bsp_button_read_mv()) == KEY_UP; }
 bool input_down_held(void) { return key_from_mv(bsp_button_read_mv()) == KEY_DOWN; }
 bool input_ok_held(void)   { return key_from_mv(bsp_button_read_mv()) == KEY_OK; }
+
+game_key_t input_held_key(void)
+{
+    return key_from_mv(bsp_button_read_mv());
+}
+
+void input_discard_events(void)
+{
+    atomic_store(&s_press, KEY_NONE);
+    atomic_store(&s_click, KEY_NONE);
+    atomic_store(&s_long, KEY_NONE);
+}

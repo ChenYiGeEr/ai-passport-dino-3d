@@ -9,11 +9,15 @@
 static int s_rect_count;
 static int s_sprite_count;
 static int s_first_sprite_y;
+static int s_last_sprite_y;
+static int s_tumbleweed_y;
 static uint32_t s_rect_signature;
 void render_sprite(const sprite_t *spr, int x, int y)
 {
-    (void)spr; (void)x;
+    (void)x;
     if (s_sprite_count == 0) s_first_sprite_y = y;
+    s_last_sprite_y = y;
+    if (spr == &spr_tumbleweed_1) s_tumbleweed_y = y;
     s_sprite_count++;
 }
 void render_fill_rect(int x, int y, int w, int h, uint16_t color)
@@ -29,11 +33,12 @@ void render_fill_rect(int x, int y, int w, int h, uint16_t color)
 static void test_tumbleweed(void)
 {
     srand(1);
-    scenery_init(205, 86, 150);
+    scenery_init(205, 86, 150, 174);
     for (int i = 0; i < DECOR_COUNT; i++) {
         s_decor[i].x = 100 + i * 40;
         s_decor[i].tumbleweed = false;
         s_decor[i].spr = &spr_rock_0;
+        s_decor[i].anchor_y = 207;
     }
     decor_t *weed = &s_decor[0];
     weed->tumbleweed = true;
@@ -45,9 +50,29 @@ static void test_tumbleweed(void)
     assert(weed->spr == &spr_tumbleweed_1);
 
     s_sprite_count = 0;
-    scenery_draw_ground(0);
-    assert(s_sprite_count == DECOR_COUNT);
-    assert(s_first_sprite_y == 183); // frame 1: 51px 画布，向上弹 1px
+    scenery_draw_ground_back(0);
+    assert(s_sprite_count == GROUND_FAR_COUNT + DECOR_COUNT);
+    assert(s_tumbleweed_y == 181); // anchor 207 - 51/2 - frame 1 bounce 1
+
+    s_sprite_count = 0;
+    scenery_draw_ground_front();
+    assert(s_sprite_count == GROUND_NEAR_COUNT);
+    assert(s_last_sprite_y >= 224); // K=3 近景严格限制在屏幕底部
+}
+
+static void test_depth_speeds(void)
+{
+    srand(2);
+    scenery_init(205, 86, 150, 174);
+    s_ground_far[0].x = 100.0f;
+    s_decor[0].x = 100.0f;
+    s_decor[0].tumbleweed = false;
+    s_ground_near[0].x = 100.0f;
+
+    scenery_update(0.1f, 100.0f);
+    assert(s_ground_far[0].x > 95.49f && s_ground_far[0].x < 95.51f);
+    assert(s_decor[0].x > 91.49f && s_decor[0].x < 91.51f);
+    assert(s_ground_near[0].x > 87.99f && s_ground_near[0].x < 88.01f);
 }
 
 static void test_stars(void)
@@ -93,6 +118,7 @@ static void test_dust(void)
 int main(void)
 {
     test_tumbleweed();
+    test_depth_speeds();
     test_stars();
     test_dust();
     puts("effects_test: ok");

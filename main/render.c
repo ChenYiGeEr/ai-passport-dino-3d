@@ -10,12 +10,15 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include <stdlib.h>
 #include <string.h>
 
 #define STRIP_H        24
 #define MAX_CMDS       1024  // HUD 大字 + 计分板都是矩形命令, 256 会截断变乱码
+#define MAX_STRIP_BUFS 2
 
 // ST7789 经 esp_lcd 发送时要求大端字节序;若实机颜色红蓝互换, 把它改成 0 试试。
 #define SWAP_BYTES     1
@@ -42,12 +45,14 @@ typedef struct {
     };
 } draw_cmd_t;
 
+static const char *TAG = "render";
 static esp_lcd_panel_handle_t s_panel;
-static uint16_t *s_strip;                  // 320 * STRIP_H, DMA 内存
+static uint16_t *s_strips[MAX_STRIP_BUFS]; // 每块 320 * STRIP_H DMA 内存
+static int s_strip_count;
 static draw_cmd_t s_cmds[MAX_CMDS];
 static int s_cmd_count;
 static uint8_t s_night_mix;                   // 精灵夜间调色强度(0..255)
-static SemaphoreHandle_t s_trans_done;        // SPI DMA 传输完成信号
+static SemaphoreHandle_t s_free_strips;       // 可安全覆写的 DMA 条带数
 
 // 背景参数(本帧)
 static uint16_t s_sky_color, s_ground_color;
@@ -59,7 +64,7 @@ static bool on_trans_done(esp_lcd_panel_io_handle_t io,
 {
     (void)io; (void)edata; (void)user;
     BaseType_t hp = pdFALSE;
-    xSemaphoreGiveFromISR(s_trans_done, &hp);
+    xSemaphoreGiveFromISR(s_free_strips, &hp);
     return hp == pdTRUE;
 }
 
@@ -70,20 +75,32 @@ void render_init(void)
     esp_lcd_panel_swap_xy(s_panel, true);
     esp_lcd_panel_mirror(s_panel, LANDSCAPE_LEFT ? false : true,
                          LANDSCAPE_LEFT ? true : false);
-    s_strip = heap_caps_malloc(RENDER_SCREEN_W * STRIP_H * sizeof(uint16_t),
-                               MALLOC_CAP_DMA);
+    const size_t strip_bytes = RENDER_SCREEN_W * STRIP_H * sizeof(uint16_t);
+    s_strips[0] = heap_caps_malloc(strip_bytes, MALLOC_CAP_DMA);
+    if (!s_strips[0]) {
+        ESP_LOGE(TAG, "首块 DMA 条带申请失败 (%u bytes)", (unsigned)strip_bytes);
+        abort();
+    }
+    s_strips[1] = heap_caps_malloc(strip_bytes, MALLOC_CAP_DMA);
+    s_strip_count = s_strips[1] ? 2 : 1;
+    if (s_strip_count == 1)
+        ESP_LOGW(TAG, "第二块 DMA 条带申请失败，退回单条带");
 
-    // 注册传输完成回调: 修横条纹的关键——上一笔 DMA 没发完就覆写缓冲
-    // 会导致屏幕上出现一道一道的横条纹。
-    s_trans_done = xSemaphoreCreateBinary();
-    xSemaphoreGive(s_trans_done);
+    // 允许 CPU 合成下一条带时，SPI DMA 同时发送上一条带。
+    s_free_strips = xSemaphoreCreateCounting(s_strip_count, s_strip_count);
+    if (!s_free_strips) {
+        ESP_LOGE(TAG, "DMA 条带信号量创建失败");
+        abort();
+    }
     esp_lcd_panel_io_handle_t io = bsp_display_io();
     if (io) {
         const esp_lcd_panel_io_callbacks_t cbs = {
             .on_color_trans_done = on_trans_done,
         };
-        esp_lcd_panel_io_register_event_callbacks(io, &cbs, NULL);
+        ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io, &cbs, NULL));
     }
+    ESP_LOGI(TAG, "DMA 条带流水 depth=%d strip=%dx%d", s_strip_count,
+             RENDER_SCREEN_W, STRIP_H);
 }
 
 void render_set_night_mix(uint8_t mix)
@@ -127,7 +144,7 @@ static inline uint16_t swap16(uint16_t v)
 }
 
 // 把一条命令画进当前条带。strip_y 为条带在屏幕上的起始 y。
-static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y)
+static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
 {
     if (c->type == CMD_RECT) {
         int y0 = c->y > strip_y ? c->y : strip_y;
@@ -137,7 +154,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y)
         uint16_t v = swap16(c->r.color);
         for (int y = y0; y < y1; y++)
             for (int x = x0; x < x1; x++)
-                s_strip[(y - strip_y) * RENDER_SCREEN_W + x] = v;
+                strip[(y - strip_y) * RENDER_SCREEN_W + x] = v;
         return;
     }
     // 精灵: 16bpp RGB565, 0x0000 透明; 按昼夜进度逐像素调向夜色
@@ -148,7 +165,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y)
     int y1 = c->y + sp->h < strip_y + STRIP_H ? c->y + sp->h : strip_y + STRIP_H;
     for (int y = y0; y < y1; y++) {
         const uint16_t *row = sp->px + (y - c->y) * sp->w;
-        uint16_t *dst = s_strip + (y - strip_y) * RENDER_SCREEN_W;
+        uint16_t *dst = strip + (y - strip_y) * RENDER_SCREEN_W;
         for (int x = x0; x < x1; x++) {
             uint16_t v = row[x - c->x];
             if (!v) continue;
@@ -173,23 +190,33 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y)
 
 void render_flush(void)
 {
+    int submitted = 0;
     for (int sy = 0; sy < RENDER_SCREEN_H; sy += STRIP_H) {
         int rows = RENDER_SCREEN_H - sy < STRIP_H ? RENDER_SCREEN_H - sy : STRIP_H;
-        // 先等上一笔 DMA 完成, 再覆写条带缓冲(顺序错了就是横条纹)
-        xSemaphoreTake(s_trans_done, portMAX_DELAY);
+        xSemaphoreTake(s_free_strips, portMAX_DELAY);
+        uint16_t *strip = s_strips[submitted % s_strip_count];
         // 背景: 地平线上为天空色, 下为地面色
         for (int y = 0; y < rows; y++) {
             uint16_t v = swap16((sy + y) < s_ground_y ? s_sky_color : s_ground_color);
             for (int x = 0; x < RENDER_SCREEN_W; x++)
-                s_strip[y * RENDER_SCREEN_W + x] = v;
+                strip[y * RENDER_SCREEN_W + x] = v;
         }
         for (int i = 0; i < s_cmd_count; i++)
-            draw_cmd_in_strip(&s_cmds[i], sy);
-        esp_lcd_panel_draw_bitmap(s_panel, 0, sy, RENDER_SCREEN_W, sy + rows, s_strip);
+            draw_cmd_in_strip(&s_cmds[i], sy, strip);
+        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, sy,
+                                                   RENDER_SCREEN_W, sy + rows, strip);
+        if (err != ESP_OK) {
+            xSemaphoreGive(s_free_strips);
+            ESP_LOGE(TAG, "条带 y=%d 提交失败: %s", sy, esp_err_to_name(err));
+        } else {
+            submitted++;
+        }
     }
-    // 帧尾等最后一笔完成, 避免下一帧 begin 时缓冲还在线上
-    xSemaphoreTake(s_trans_done, portMAX_DELAY);
-    xSemaphoreGive(s_trans_done);
+    // 取尽所有空闲令牌，确保最后两笔 DMA 都完成，再恢复下一帧初始状态。
+    for (int i = 0; i < s_strip_count; i++)
+        xSemaphoreTake(s_free_strips, portMAX_DELAY);
+    for (int i = 0; i < s_strip_count; i++)
+        xSemaphoreGive(s_free_strips);
 }
 
 // ---- 串口截屏导出 ----
@@ -201,20 +228,21 @@ bool render_dump_pending(void) { return s_dump_pending; }
 void render_dump_frame(render_dump_writer_t writer)
 {
     s_dump_pending = false;
+    uint16_t *strip = s_strips[0];
     for (int sy = 0; sy < RENDER_SCREEN_H; sy += STRIP_H) {
         int rows = RENDER_SCREEN_H - sy < STRIP_H ? RENDER_SCREEN_H - sy : STRIP_H;
         for (int y = 0; y < rows; y++) {
             uint16_t v = (sy + y) < s_ground_y ? s_sky_color : s_ground_color;
             for (int x = 0; x < RENDER_SCREEN_W; x++)
-                s_strip[y * RENDER_SCREEN_W + x] = v;
+                strip[y * RENDER_SCREEN_W + x] = v;
         }
         for (int i = 0; i < s_cmd_count; i++)
-            draw_cmd_in_strip(&s_cmds[i], sy);
-        // s_strip 里存的是屏幕端字节序(可能已 swap), 导出为 RGB565LE 需还原
+            draw_cmd_in_strip(&s_cmds[i], sy, strip);
+        // strip 里存的是屏幕端字节序(可能已 swap), 导出为 RGB565LE 需还原
         int n = RENDER_SCREEN_W * rows;
 #if SWAP_BYTES
-        for (int i = 0; i < n; i++) s_strip[i] = swap16(s_strip[i]);
+        for (int i = 0; i < n; i++) strip[i] = swap16(strip[i]);
 #endif
-        writer((const uint8_t *)s_strip, n * 2);
+        writer((const uint8_t *)strip, n * 2);
     }
 }

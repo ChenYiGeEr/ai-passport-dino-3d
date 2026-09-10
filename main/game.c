@@ -16,14 +16,18 @@
 #include "fap_screenshot.h"
 #include "day_cycle.h"
 #include "dust.h"
+#include "idle_sleep.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "bsp_display.h"
 #include <stdio.h>
+
+static const char *TAG = "game";
 
 // ---- 布局(320x240 横屏, 2D 版 dino3d 沙漠场景) ----
 #define GROUND_Y      205   // 恐龙脚底(跑道面)
@@ -131,6 +135,17 @@ static uint32_t s_last_flash; // 已提示到的整百
 static float s_flash_until;   // 游戏时间秒；暂停时冻结
 static int s_lives;           // 剩余红心
 static float s_invincible_until; // 游戏时间秒；暂停时冻结
+static idle_sleep_t s_idle_sleep;
+
+typedef struct {
+    int64_t window_start_us;
+    int64_t slowest_frame_us;
+    int64_t render_total_us;
+    int64_t render_max_us;
+    uint32_t frames;
+} perf_stats_t;
+
+static perf_stats_t s_perf;
 
 // ---- 设置菜单 ----
 static const int VOL_LEVELS[] = { 0, 20, 40, 60, 80, 100 };
@@ -192,6 +207,39 @@ static void settings_apply(void)
 {
     sfx_set_volume((uint8_t)VOL_LEVELS[s_vol_idx]);
     bsp_display_backlight((uint8_t)BL_LEVELS[s_bl_idx]);
+}
+
+static bool sleep_eligible(game_state_t state)
+{
+    return state != ST_RUNNING;
+}
+
+static void perf_reset(void)
+{
+    s_perf = (perf_stats_t) { 0 };
+}
+
+static void perf_record(int64_t frame_start_us, int64_t render_start_us,
+                        int64_t frame_end_us)
+{
+    if (s_perf.window_start_us == 0)
+        s_perf.window_start_us = frame_start_us;
+    int64_t frame_us = frame_end_us - frame_start_us;
+    int64_t render_us = frame_end_us - render_start_us;
+    if (frame_us > s_perf.slowest_frame_us) s_perf.slowest_frame_us = frame_us;
+    if (render_us > s_perf.render_max_us) s_perf.render_max_us = render_us;
+    s_perf.render_total_us += render_us;
+    s_perf.frames++;
+
+    int64_t elapsed_us = frame_end_us - s_perf.window_start_us;
+    if (elapsed_us < 2000000 || s_perf.frames == 0)
+        return;
+    ESP_LOGI(TAG, "fps=%.1f slow=%.1fms render_avg=%.1fms render_max=%.1fms",
+             (double)s_perf.frames * 1000000.0 / (double)elapsed_us,
+             (double)s_perf.slowest_frame_us / 1000.0,
+             (double)s_perf.render_total_us / (double)s_perf.frames / 1000.0,
+             (double)s_perf.render_max_us / 1000.0);
+    perf_reset();
 }
 
 static int speed_level(void)
@@ -297,7 +345,7 @@ static void draw_frame(void)
         }
     }
 
-    scenery_draw_ground(day_cycle_color(&s_day_cycle, SPECKLE_COLORS));
+    scenery_draw_ground_back(day_cycle_color(&s_day_cycle, SPECKLE_COLORS));
     dust_draw(day_cycle_color(&s_day_cycle, DUST_NEAR_COLORS),
               day_cycle_color(&s_day_cycle, DUST_FAR_COLORS));
 
@@ -319,6 +367,8 @@ static void draw_frame(void)
                      (((uint32_t)(s_game_time_s * 10.0f)) & 1);
     if (!blink_out)
         render_sprite(player_sprite(&s_player), dx, dy);
+
+    scenery_draw_ground_front();
 
     // 左上角红心(剩余生命)
     for (int i = 0; i < s_lives; i++)
@@ -348,24 +398,58 @@ void game_run(void)
     s_hi_score = hi_score_load();
     player_init(&s_player, DINO_X, GROUND_Y);
     obstacles_init(GROUND_Y);
-    scenery_init(GROUND_Y, FAR_TOP, RIVER_Y);
+    scenery_init(GROUND_Y, FAR_TOP, RIVER_Y, FIELD_Y);
     game_reset();
     s_state = ST_READY;
 
     int64_t last = esp_timer_get_time();
+    idle_sleep_init(&s_idle_sleep, last, true);
+    perf_reset();
 
     while (1) {
-        int64_t now = esp_timer_get_time();
-        float dt = (now - last) / 1000000.0f;
-        last = now;
+        int64_t frame_start = esp_timer_get_time();
+        float dt = (frame_start - last) / 1000000.0f;
+        last = frame_start;
         if (dt > 0.1f) dt = 0.1f; // 防卡顿大步长穿墙
 
         game_key_t press = input_take_press();
-        bool up_held = input_up_held();
-        bool down_held = input_down_held();
+        game_key_t click = input_take_click();
+        game_key_t long_press = input_take_long();
+        game_key_t held = input_held_key();
+        bool was_consuming = idle_sleep_consumes_input(&s_idle_sleep);
+        idle_sleep_event_t idle_event = idle_sleep_update(
+            &s_idle_sleep, frame_start, sleep_eligible(s_state),
+            press != KEY_NONE, held != KEY_NONE);
+
+        if (idle_event == IDLE_SLEEP_EVENT_SLEEP) {
+            bsp_display_backlight(0);
+            ESP_LOGI(TAG, "非运行状态空闲30秒，关闭背光和画面刷新");
+        } else if (idle_event == IDLE_SLEEP_EVENT_WAKE) {
+            bsp_display_backlight((uint8_t)BL_LEVELS[s_bl_idx]);
+            ESP_LOGI(TAG, "按键唤醒，恢复背光 %d%%", BL_LEVELS[s_bl_idx]);
+        }
+
+        if (was_consuming || idle_event != IDLE_SLEEP_EVENT_NONE ||
+            idle_sleep_consumes_input(&s_idle_sleep)) {
+            input_discard_events();
+            if (idle_event == IDLE_SLEEP_EVENT_WAKE) {
+                draw_frame();
+                fap_screenshot_pump();
+            } else if (idle_sleep_is_asleep(&s_idle_sleep)) {
+                // 截屏仍可导出息屏前冻结的最后一帧，不会重新推送 LCD。
+                fap_screenshot_pump();
+            }
+            perf_reset();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        bool up_held = held == KEY_UP;
+        bool down_held = held == KEY_DOWN;
+        game_state_t state_before = s_state;
 
         // 长按 OK: 进入/退出设置菜单(任何状态下可用)
-        if (input_take_long() == KEY_OK) {
+        if (long_press == KEY_OK) {
             if (s_state == ST_SETTINGS) {
                 settings_save();
                 s_state = s_return_state;
@@ -376,12 +460,7 @@ void game_run(void)
                 s_editing = false;
                 s_state = ST_SETTINGS;
             }
-            draw_frame();
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
-        }
-
-        switch (s_state) {
+        } else switch (s_state) {
         case ST_READY:
             if (press == KEY_UP) {
                 s_state = ST_RUNNING;
@@ -483,7 +562,7 @@ void game_run(void)
             if (!s_editing) {
                 if (press == KEY_UP || press == KEY_DOWN)
                     s_menu_row ^= 1;
-                if (input_take_click() == KEY_OK)
+                if (click == KEY_OK)
                     s_editing = true;
             } else {
                 int dir = (press == KEY_UP) ? 1 : (press == KEY_DOWN) ? -1 : 0;
@@ -499,14 +578,22 @@ void game_run(void)
                     }
                     settings_apply(); // 立即生效(音量/背光)
                 }
-                if (input_take_click() == KEY_OK)
+                if (click == KEY_OK)
                     s_editing = false;
             }
             break;
         }
 
+        if (s_state != state_before && sleep_eligible(s_state))
+            idle_sleep_reset(&s_idle_sleep, frame_start);
+
+        int64_t render_start = esp_timer_get_time();
         draw_frame();
         fap_screenshot_pump(); // 若收到截屏请求, 此刻导出本帧
-        vTaskDelay(pdMS_TO_TICKS(5)); // 限制在 ~60fps 以内, 让出 CPU
+        int64_t frame_end = esp_timer_get_time();
+        if (s_state == ST_RUNNING)
+            perf_record(frame_start, render_start, frame_end);
+        else
+            perf_reset();
     }
 }
