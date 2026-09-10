@@ -8,14 +8,21 @@
 #define CLOUD_COUNT  3
 #define DECOR_COUNT  4
 #define FAR_COUNT    4
+#define STAR_COUNT  14
 // 云的视差系数: 比地面慢, 营造远近层次
 #define CLOUD_PARALLAX 0.25f
 // 远景(树/小仙人掌)视差系数
 #define FAR_PARALLAX   0.45f
 
 typedef struct { float x, y; int w; } cloud_t;
-typedef struct { float x; const sprite_t *spr; } decor_t;
+typedef struct {
+    float x;
+    float roll_distance;
+    const sprite_t *spr;
+    bool tumbleweed;
+} decor_t;
 typedef struct { float x, y; const sprite_t *spr; } far_t;
+typedef struct { uint16_t x; uint8_t y, reveal, period, phase; } star_t;
 
 static cloud_t s_clouds[CLOUD_COUNT];
 static decor_t s_decor[DECOR_COUNT];
@@ -24,13 +31,29 @@ static int s_ground_y;
 static int s_far_top, s_far_bottom; // 远河岸纵向范围
 static float s_speckle_off; // 地面斑点滚动偏移
 
+static const star_t STARS[STAR_COUNT] = {
+    { 55, 18, 52, 11, 1 }, { 82, 45, 58, 13, 7 }, { 108, 27, 64, 17, 5 },
+    { 136, 67, 70, 14, 9 }, { 160, 38, 76, 19, 2 }, { 188, 57, 82, 12, 6 },
+    { 215, 42, 54, 16, 8 }, { 242, 69, 60, 15, 4 }, { 272, 51, 67, 18, 3 },
+    { 302, 75, 74, 13, 10 }, { 66, 76, 80, 20, 12 }, { 119, 53, 86, 16, 11 },
+    { 232, 20, 72, 21, 13 }, { 286, 32, 84, 17, 15 },
+};
+
+static const sprite_t *TUMBLEWEED_FRAMES[] = {
+    &spr_tumbleweed_0, &spr_tumbleweed_1, &spr_tumbleweed_2, &spr_tumbleweed_3,
+    &spr_tumbleweed_4, &spr_tumbleweed_5, &spr_tumbleweed_6, &spr_tumbleweed_7,
+};
+#define TUMBLEWEED_FRAME_COUNT 8
+#define TUMBLEWEED_SPEED       1.15f
+#define TUMBLEWEED_FRAME_PX   14.0f
+
 static const sprite_t *DECOR_SPRITES[] = {
     &spr_rock_0, &spr_rock_1, &spr_rock_2, &spr_rock_3, &spr_rock_4,
     &spr_flower_0, &spr_flower_1, &spr_flower_2,
-    &spr_scorpion, &spr_tumbleweed,
+    &spr_scorpion,
     // 骷髅头只保留 K=1 小号远景版(spr_skull_far), 不在近景出现
 };
-#define DECOR_SPRITE_COUNT 10
+#define DECOR_SPRITE_COUNT 10 // 9 个普通精灵 + 1 个风滚草选项
 
 static const sprite_t *FAR_SPRITES[] = {
     &spr_tree_green_far, &spr_tree_dead_far,
@@ -49,8 +72,10 @@ static void spawn_cloud(cloud_t *c, bool initial)
 
 static void spawn_decor(decor_t *d, bool initial)
 {
-    const sprite_t *sp = DECOR_SPRITES[rand() % DECOR_SPRITE_COUNT];
-    d->spr = sp;
+    int choice = rand() % DECOR_SPRITE_COUNT;
+    d->tumbleweed = choice == DECOR_SPRITE_COUNT - 1;
+    d->roll_distance = 0;
+    d->spr = d->tumbleweed ? TUMBLEWEED_FRAMES[0] : DECOR_SPRITES[choice];
     d->x = initial ? (float)(rand() % RENDER_SCREEN_W)
                    : (float)(RENDER_SCREEN_W + 20 + rand() % 120);
 }
@@ -90,7 +115,14 @@ void scenery_update(float dt, float speed_px)
         if (s_clouds[i].x + s_clouds[i].w < -20) spawn_cloud(&s_clouds[i], false);
     }
     for (int i = 0; i < DECOR_COUNT; i++) {
-        s_decor[i].x -= speed_px * dt;
+        float travel = speed_px * dt * (s_decor[i].tumbleweed ? TUMBLEWEED_SPEED : 1.0f);
+        s_decor[i].x -= travel;
+        if (s_decor[i].tumbleweed) {
+            s_decor[i].roll_distance += travel;
+            int frame = (int)(s_decor[i].roll_distance / TUMBLEWEED_FRAME_PX)
+                        % TUMBLEWEED_FRAME_COUNT;
+            s_decor[i].spr = TUMBLEWEED_FRAMES[frame];
+        }
         if (s_decor[i].x + s_decor[i].spr->w < -20) spawn_decor(&s_decor[i], false);
     }
     for (int i = 0; i < FAR_COUNT; i++) {
@@ -101,8 +133,26 @@ void scenery_update(float dt, float speed_px)
     if (s_speckle_off >= 8) s_speckle_off -= 8; // 斑点图案周期 8px
 }
 
-void scenery_draw_sky(uint16_t cloud_color)
+void scenery_draw_sky(uint16_t cloud_color, uint16_t star_dim,
+                      uint16_t star_bright, float night_progress,
+                      float game_time_s)
 {
+    int visible = (int)(night_progress * 100.0f + 0.5f);
+    uint32_t tick = (uint32_t)(game_time_s * 10.0f);
+    for (int i = 0; i < STAR_COUNT; i++) {
+        const star_t *s = &STARS[i];
+        if (visible < s->reveal) continue;
+        uint32_t phase = (tick + s->phase) % s->period;
+        bool bright = phase < 2 || phase + 2 >= s->period;
+        if (bright && (i % 3 == 0)) {
+            render_fill_rect(s->x - 1, s->y, 3, 1, star_bright);
+            render_fill_rect(s->x, s->y - 1, 1, 3, star_bright);
+        } else {
+            render_fill_rect(s->x, s->y, bright ? 2 : 1, bright ? 2 : 1,
+                             bright ? star_bright : star_dim);
+        }
+    }
+
     // 云: 两个矩形拼的像素团
     for (int i = 0; i < CLOUD_COUNT; i++) {
         cloud_t *c = &s_clouds[i];
@@ -120,18 +170,26 @@ void scenery_draw_far(void)
     }
 }
 
-void scenery_draw_ground(void)
+void scenery_draw_ground(uint16_t speckle_color)
 {
     // 地面斑点: 随速度滚动的小点, 营造地面移动感
     for (int i = 0; i < 14; i++) {
         int x = ((i * 53) - (int)s_speckle_off * 7) % (RENDER_SCREEN_W + 16);
         if (x < 0) x += RENDER_SCREEN_W + 16;
         int y = s_ground_y + 6 + (i * 7) % (RENDER_SCREEN_H - s_ground_y - 12);
-        render_fill_rect(x, y, 3, 2, RGB565(180, 150, 90));
+        render_fill_rect(x, y, 3, 2, speckle_color);
     }
     // 地面装饰精灵
     for (int i = 0; i < DECOR_COUNT; i++) {
         decor_t *d = &s_decor[i];
-        render_sprite(d->spr, (int)d->x, s_ground_y + 4 - d->spr->h / 2);
+        int bounce = 0;
+        if (d->tumbleweed) {
+            int frame = (int)(d->roll_distance / TUMBLEWEED_FRAME_PX)
+                        % TUMBLEWEED_FRAME_COUNT;
+            static const uint8_t BOUNCE[8] = { 0, 1, 2, 1, 0, 1, 2, 1 };
+            bounce = BOUNCE[frame];
+        }
+        render_sprite(d->spr, (int)d->x,
+                      s_ground_y + 4 - d->spr->h / 2 - bounce);
     }
 }

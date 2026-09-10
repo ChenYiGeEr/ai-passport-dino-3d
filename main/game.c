@@ -4,7 +4,7 @@
 // 数值对齐原版 dino3d:
 // - 分数: 10 分/秒, 每 100 分闪烁提示一次(score_manager.js: add_vel=10, step=100)
 // - 速度: 四档, 初始 120px/s, 每 100 分升一点, 上限约 3 倍(enemy_manager.js: vel 上限 35)
-// - 昼夜: 每 700 分切换一次(原版 chrome dino 的周期), 用调色板整体切换模拟
+// - 昼夜: 每 700 分切换一次，2 秒内经过四个关键色平滑过渡
 #include "game.h"
 #include "render.h"
 #include "player.h"
@@ -13,6 +13,9 @@
 #include "hud.h"
 #include "input.h"
 #include "sfx.h"
+#include "fap_screenshot.h"
+#include "day_cycle.h"
+#include "dust.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -55,6 +58,59 @@
 #define INK_DAY       RGB565(60, 50, 30)
 #define INK_NIGHT     RGB565(200, 200, 220)
 
+#define SKY_SUNSET       RGB565(224, 142, 82)
+#define SKY_DUSK         RGB565(91, 65, 96)
+#define FAR_SUNSET       RGB565(190, 112, 68)
+#define FAR_DUSK         RGB565(76, 54, 82)
+#define RIVER_SUNSET     RGB565(91, 145, 166)
+#define RIVER_DUSK       RGB565(48, 71, 112)
+#define WAVE_SUNSET      RGB565(138, 187, 191)
+#define WAVE_DUSK        RGB565(76, 96, 139)
+#define GROUND_SUNSET    RGB565(204, 142, 76)
+#define GROUND_DUSK      RGB565(91, 61, 76)
+#define CLOUD_SUNSET     RGB565(255, 214, 180)
+#define CLOUD_DUSK       RGB565(151, 122, 145)
+#define INK_SUNSET       RGB565(67, 43, 28)
+#define INK_DUSK         RGB565(170, 154, 170)
+
+static const uint16_t SKY_COLORS[] = { SKY_DAY, SKY_SUNSET, SKY_DUSK, SKY_NIGHT };
+static const uint16_t FAR_COLORS[] = { FAR_DAY, FAR_SUNSET, FAR_DUSK, FAR_NIGHT };
+static const uint16_t RIVER_COLORS[] = { RIVER_DAY, RIVER_SUNSET, RIVER_DUSK, RIVER_NIGHT };
+static const uint16_t WAVE_COLORS[] = { WAVE_DAY, WAVE_SUNSET, WAVE_DUSK, WAVE_NIGHT };
+static const uint16_t GROUND_COLORS[] = { GROUND_DAY, GROUND_SUNSET, GROUND_DUSK, GROUND_NIGHT };
+static const uint16_t CLOUD_COLORS[] = { CLOUD_DAY, CLOUD_SUNSET, CLOUD_DUSK, CLOUD_NIGHT };
+static const uint16_t INK_COLORS[] = { INK_DAY, INK_SUNSET, INK_DUSK, INK_NIGHT };
+static const uint16_t HORIZON_COLORS[] = {
+    RGB565(200, 165, 85), RGB565(180, 120, 72),
+    RGB565(104, 78, 105), RGB565(120, 120, 160),
+};
+static const uint16_t SPECKLE_COLORS[] = {
+    RGB565(180, 150, 90), RGB565(166, 108, 69),
+    RGB565(77, 55, 74), RGB565(44, 43, 72),
+};
+static const uint16_t SHADOW_COLORS[] = {
+    RGB565(120, 95, 45), RGB565(105, 66, 42),
+    RGB565(52, 42, 57), RGB565(13, 16, 35),
+};
+static const uint16_t DUST_NEAR_COLORS[] = {
+    RGB565(211, 170, 86), RGB565(192, 125, 70),
+    RGB565(102, 70, 80), RGB565(54, 50, 72),
+};
+static const uint16_t DUST_FAR_COLORS[] = {
+    RGB565(236, 202, 116), RGB565(218, 153, 91),
+    RGB565(130, 91, 105), RGB565(76, 71, 96),
+};
+static const uint16_t STAR_DIM_COLORS[] = {
+    SKY_DAY, SKY_SUNSET, RGB565(157, 146, 166), RGB565(125, 132, 168),
+};
+static const uint16_t STAR_BRIGHT_COLORS[] = {
+    SKY_DAY, SKY_SUNSET, RGB565(225, 213, 200), RGB565(247, 240, 216),
+};
+static const uint16_t PANEL_COLORS[] = {
+    RGB565(40, 32, 16), RGB565(48, 27, 22),
+    RGB565(25, 20, 37), RGB565(10, 10, 30),
+};
+
 typedef enum {
     ST_READY,      // 待机: 恐龙站立, 按 UP 开跑
     ST_RUNNING,
@@ -68,11 +124,13 @@ static game_state_t s_state;
 static float s_score;
 static uint32_t s_hi_score;
 static float s_speed;
-static bool s_night;
+static bool s_want_night;
+static day_cycle_t s_day_cycle;
+static float s_game_time_s;
 static uint32_t s_last_flash; // 已提示到的整百
-static int64_t s_flash_until; // 闪烁截止时间(esp_timer_get_time)
+static float s_flash_until;   // 游戏时间秒；暂停时冻结
 static int s_lives;           // 剩余红心
-static int64_t s_invincible_until; // 无敌截止时间(esp_timer_get_time)
+static float s_invincible_until; // 游戏时间秒；暂停时冻结
 
 // ---- 设置菜单 ----
 static const int VOL_LEVELS[] = { 0, 20, 40, 60, 80, 100 };
@@ -151,20 +209,23 @@ static void game_reset(void)
     scenery_reset();
     s_score = 0;
     s_speed = SPEED_BASE;
-    s_night = false;
+    s_want_night = false;
+    day_cycle_reset(&s_day_cycle);
+    s_game_time_s = 0;
     s_last_flash = 0;
     s_flash_until = 0;
     s_lives = MAX_LIVES;
     s_invincible_until = 0;
-    render_set_night(false);
+    dust_reset();
+    render_set_night_mix(0);
 }
 
 // 设置菜单绘制: 半透明感的深色面板 + 两行档位, 选中行反色
 static void draw_settings(uint16_t ink)
 {
     const int px = 60, py = 66, pw = 200, ph = 108;
-    uint16_t panel = s_night ? RGB565(10, 10, 30) : RGB565(40, 32, 16);
-    uint16_t hi_fg = s_night ? RGB565(10, 10, 30) : RGB565(40, 32, 16);
+    uint16_t panel = day_cycle_color(&s_day_cycle, PANEL_COLORS);
+    uint16_t hi_fg = panel;
     // 面板 + 边框
     render_fill_rect(px, py, pw, ph, panel);
     render_fill_rect(px, py, pw, 2, ink);
@@ -200,25 +261,28 @@ static void draw_settings(uint16_t ink)
 
 static void draw_frame(void)
 {
-    uint16_t sky = s_night ? SKY_NIGHT : SKY_DAY;
-    uint16_t ground = s_night ? GROUND_NIGHT : GROUND_DAY;
-    uint16_t ink = s_night ? INK_NIGHT : INK_DAY;
+    uint16_t sky = day_cycle_color(&s_day_cycle, SKY_COLORS);
+    uint16_t ground = day_cycle_color(&s_day_cycle, GROUND_COLORS);
+    uint16_t ink = day_cycle_color(&s_day_cycle, INK_COLORS);
 
     // 背景: FAR_TOP 以下全是地面色, 远场带/河面覆盖上去
     render_begin(sky, ground, FAR_TOP);
-    scenery_draw_sky(s_night ? CLOUD_NIGHT : CLOUD_DAY);
+    scenery_draw_sky(day_cycle_color(&s_day_cycle, CLOUD_COLORS),
+                     day_cycle_color(&s_day_cycle, STAR_DIM_COLORS),
+                     day_cycle_color(&s_day_cycle, STAR_BRIGHT_COLORS),
+                     day_cycle_night_progress(&s_day_cycle), s_game_time_s);
 
     // 远场带(树站立的河岸)
     render_fill_rect(0, FAR_TOP, RENDER_SCREEN_W, RIVER_Y - FAR_TOP,
-                     s_night ? FAR_NIGHT : FAR_DAY);
+                     day_cycle_color(&s_day_cycle, FAR_COLORS));
     scenery_draw_far();
 
     // 伪透视: 河面向右上方收拢(对齐原版地面向远方消失点的观感)
     {
-        uint16_t riv_c = s_night ? RIVER_NIGHT : RIVER_DAY;
-        uint16_t hor_c = s_night ? RGB565(120, 120, 160) : RGB565(200, 165, 85);
-        uint16_t wave = s_night ? WAVE_NIGHT : WAVE_DAY;
-        int wave_off = (int)(esp_timer_get_time() / 30000) % 48;
+        uint16_t riv_c = day_cycle_color(&s_day_cycle, RIVER_COLORS);
+        uint16_t hor_c = day_cycle_color(&s_day_cycle, HORIZON_COLORS);
+        uint16_t wave = day_cycle_color(&s_day_cycle, WAVE_COLORS);
+        int wave_off = (int)(s_game_time_s / 0.03f) % 48;
         for (int x = 0; x < RENDER_SCREEN_W; x += 4) {
             int riv_top = RIVER_Y + x / 53;     // 150 → 156
             int riv_bot = FIELD_Y - x / 80;     // 174 → 170 河面变窄
@@ -233,7 +297,9 @@ static void draw_frame(void)
         }
     }
 
-    scenery_draw_ground();
+    scenery_draw_ground(day_cycle_color(&s_day_cycle, SPECKLE_COLORS));
+    dust_draw(day_cycle_color(&s_day_cycle, DUST_NEAR_COLORS),
+              day_cycle_color(&s_day_cycle, DUST_FAR_COLORS));
 
     obstacles_draw();
 
@@ -246,11 +312,11 @@ static void draw_frame(void)
         int sh_w = sp->w * 4 / 5 - air / 3;
         if (sh_w < 8) sh_w = 8;
         render_fill_rect((int)s_player.x - sh_w / 2 + 4, GROUND_Y + 1,
-                         sh_w, 3, RGB565(120, 95, 45));
+                         sh_w, 3, day_cycle_color(&s_day_cycle, SHADOW_COLORS));
     }
     // 无敌期间恐龙闪烁(隔 100ms 隐去)
-    bool blink_out = esp_timer_get_time() < s_invincible_until &&
-                     ((esp_timer_get_time() / 100000) & 1);
+    bool blink_out = s_game_time_s < s_invincible_until &&
+                     (((uint32_t)(s_game_time_s * 10.0f)) & 1);
     if (!blink_out)
         render_sprite(player_sprite(&s_player), dx, dy);
 
@@ -259,8 +325,8 @@ static void draw_frame(void)
         render_sprite(&spr_heart, 6 + i * 15, 6);
 
     // HUD: 破整百时闪烁当前分
-    bool blink = esp_timer_get_time() < s_flash_until &&
-                 (((uint32_t)(esp_timer_get_time() / 200000)) & 1);
+    bool blink = s_game_time_s < s_flash_until &&
+                 (((uint32_t)(s_game_time_s * 5.0f)) & 1);
     hud_draw_scores((uint32_t)s_score, s_hi_score, !blink, ink);
 
     if (s_state == ST_PAUSED) hud_draw_paused(ink);
@@ -275,6 +341,7 @@ void game_run(void)
     render_init();
     input_init();
     sfx_init();
+    fap_screenshot_init(); // 串口截屏协议(社区发布用)
     settings_load();
     settings_apply(); // 音量 + 背光按上次设置生效
 
@@ -316,13 +383,22 @@ void game_run(void)
 
         switch (s_state) {
         case ST_READY:
-            if (press == KEY_UP) { s_state = ST_RUNNING; sfx_play(SFX_JUMP); player_jump(&s_player); }
-            player_update(&s_player, dt, false, false, 0);
+            if (press == KEY_UP) {
+                s_state = ST_RUNNING;
+                player_queue_jump(&s_player);
+            }
+            if (player_update(&s_player, dt, false, false, 0) & PLAYER_EVENT_JUMPED) {
+                sfx_play(SFX_JUMP);
+                dust_emit_start((int)s_player.x, GROUND_Y);
+            }
+            dust_update(dt);
             break;
 
         case ST_RUNNING:
             if (press == KEY_OK) { s_state = ST_PAUSED; break; }
-            if (press == KEY_UP) { player_jump(&s_player); sfx_play(SFX_JUMP); }
+            if (press == KEY_UP) player_queue_jump(&s_player);
+
+            s_game_time_s += dt;
 
             // 分数与速度
             s_score += SCORE_RATE * dt;
@@ -334,22 +410,28 @@ void game_run(void)
                 uint32_t step = (uint32_t)s_score / SCORE_PER_STEP;
                 if (step > s_last_flash) {
                     s_last_flash = step;
-                    s_flash_until = esp_timer_get_time() + 1000000;
+                    s_flash_until = s_game_time_s + 1.0f;
                 }
             }
 
             // 昼夜切换
             {
-                bool want_night = (((uint32_t)s_score / DAY_NIGHT_EVERY) & 1) == 1;
-                if (want_night != s_night) {
-                    s_night = want_night;
-                    render_set_night(s_night);
-                }
+                s_want_night = (((uint32_t)s_score / DAY_NIGHT_EVERY) & 1) == 1;
+                day_cycle_update(&s_day_cycle, s_want_night, dt);
+                render_set_night_mix(day_cycle_night_mix(&s_day_cycle));
             }
 
-            player_update(&s_player, dt, up_held, down_held, speed_level());
+            {
+                player_event_t events = player_update(&s_player, dt, up_held,
+                                                      down_held, speed_level());
+                if (events & PLAYER_EVENT_LANDED)
+                    dust_emit_land((int)s_player.x, GROUND_Y);
+                if (events & PLAYER_EVENT_JUMPED)
+                    sfx_play(SFX_JUMP);
+            }
             obstacles_update(dt, s_speed, (uint32_t)s_score, speed_level(), s_lives);
             scenery_update(dt, s_speed);
+            dust_update(dt);
 
             // 碰撞: 红心=吃掉, 障碍=扣心(心碎裂消失 + 无敌 1.5s)
             {
@@ -361,7 +443,7 @@ void game_run(void)
                         obstacles_remove(hit);
                         if (s_lives < MAX_LIVES) s_lives++;
                         sfx_play(SFX_JUMP);
-                    } else if (esp_timer_get_time() > s_invincible_until) {
+                    } else if (s_game_time_s >= s_invincible_until) {
                         obstacles_remove(hit);
                         s_lives--;
                         if (s_lives <= 0) {
@@ -373,7 +455,7 @@ void game_run(void)
                                 hi_score_save(s_hi_score);
                             }
                         } else {
-                            s_invincible_until = esp_timer_get_time() + INVINCIBLE_MS * 1000;
+                            s_invincible_until = s_game_time_s + INVINCIBLE_MS / 1000.0f;
                             sfx_play(SFX_DEATH);
                         }
                     }
@@ -424,6 +506,7 @@ void game_run(void)
         }
 
         draw_frame();
+        fap_screenshot_pump(); // 若收到截屏请求, 此刻导出本帧
         vTaskDelay(pdMS_TO_TICKS(5)); // 限制在 ~60fps 以内, 让出 CPU
     }
 }

@@ -121,6 +121,23 @@ function renderSprite(model, k) {
     return { w, h, px };
 }
 
+// 风滚草运行时渲染器不支持旋转；在透明方形画布上离线烘焙 8 个滚动角度。
+function rotateSprite(sprite, angle) {
+    const side = Math.ceil(Math.sqrt(sprite.w * sprite.w + sprite.h * sprite.h));
+    const px = new Uint16Array(side * side);
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    const srcCx = (sprite.w - 1) / 2, srcCy = (sprite.h - 1) / 2;
+    const dstC = (side - 1) / 2;
+    for (let y = 0; y < side; y++) for (let x = 0; x < side; x++) {
+        const dx = x - dstC, dy = y - dstC;
+        const sx = Math.round(cos * dx + sin * dy + srcCx);
+        const sy = Math.round(-sin * dx + cos * dy + srcCy);
+        if (sx >= 0 && sy >= 0 && sx < sprite.w && sy < sprite.h)
+            px[y * side + x] = sprite.px[sy * sprite.w + sx];
+    }
+    return { w: side, h: side, px };
+}
+
 /* ---------------- 要烘焙的模型清单 ----------------
  * name: C 符号名; file: 相对 objects/ 的路径
  */
@@ -144,7 +161,7 @@ for (let i = 0; i <= 4; i++) MODELS.push({ name: `rock_${i}`, file: `rocks/${i}.
 for (let i = 0; i <= 2; i++) MODELS.push({ name: `flower_${i}`, file: `flowers/${i}.vox` });
 MODELS.push({ name: 'skull', file: 'misc/desert_skull.vox' });
 MODELS.push({ name: 'scorpion', file: 'misc/scorpion.vox' });
-MODELS.push({ name: 'tumbleweed', file: 'misc/tumbleweed.vox' });
+// tumbleweed 在下方单独扩成 8 个离线旋转帧。
 // 远景元素(K=1 小号, 放在远河岸/天边, 纯装饰不碰撞)
 MODELS.push({ name: 'tree_green_far', file: 'misc/trees/green.vox', k: 2 });
 MODELS.push({ name: 'tree_dead_far', file: 'misc/trees/dead.vox', k: 2 });
@@ -161,6 +178,14 @@ const models = MODELS.map(m => {
     console.log(`${m.name}: ${sp.w}x${sp.h} (${m.file})`);
     return { name: m.name, w: sp.w, h: sp.h, px: sp.px };
 });
+{
+    const source = renderSprite(parseVox(path.join(DINO3D, 'misc/tumbleweed.vox')));
+    for (let i = 0; i < 8; i++) {
+        const sp = rotateSprite(source, i * Math.PI / 4);
+        models.push({ name: `tumbleweed_${i}`, w: sp.w, h: sp.h, px: sp.px });
+        console.log(`tumbleweed_${i}: ${sp.w}x${sp.h} (misc/tumbleweed.vox)`);
+    }
+}
 const allModels = models; // const 引用, 下面 push 手绘红心
 
 /* ---------------- 手绘红心(原版无此模型, ASCII 稿) ---------------- */
@@ -242,7 +267,8 @@ console.log('wrote', OUT_H, 'and', OUT_C);
     blit(pick('ptero_0'), 430, 150); blit(pick('ptero_1'), 500, 150);
     for (let i = 0; i <= 4; i++) blit(pick(`rock_${i}`), 10 + i * 30, 230);
     for (let i = 0; i <= 2; i++) blit(pick(`flower_${i}`), 180 + i * 20, 230);
-    blit(pick('skull'), 260, 220); blit(pick('scorpion'), 340, 230); blit(pick('tumbleweed'), 420, 225);
+    blit(pick('skull'), 260, 220); blit(pick('scorpion'), 340, 230);
+    for (let i = 0; i < 8; i++) blit(pick(`tumbleweed_${i}`), 400 + i * 28, 225 + (i & 1) * 42);
     blit(pick('tree_green_far'), 480, 200); blit(pick('tree_dead_far'), 540, 200);
     blit(pick('cactus_far_0'), 480, 260); blit(pick('cactus_far_1'), 510, 260); blit(pick('cactus_far_2'), 540, 260);
     blit(pick('skull_far'), 570, 260);

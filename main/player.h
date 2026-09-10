@@ -16,17 +16,30 @@ typedef struct {
     bool dead;
     int anim_frame;      // 当前动画帧
     float anim_timer;    // 帧切换计时
+    float jump_buffer_s; // 落地前预输入的剩余有效时间
 } player_t;
+
+#define PLAYER_JUMP_BUFFER_S 0.080f
+
+typedef enum {
+    PLAYER_EVENT_NONE   = 0,
+    PLAYER_EVENT_JUMPED = 1 << 0,
+    PLAYER_EVENT_LANDED = 1 << 1,
+} player_event_t;
 
 void player_init(player_t *p, int ground_x, int ground_y);
 void player_reset(player_t *p);
 
-// 请求跳跃(仅在地面且未下蹲时生效;空中无效,只触发一次)。
-void player_jump(player_t *p);
+// 立即请求跳跃；成功时返回 true。
+bool player_jump(player_t *p);
+
+// 记录一次跳跃输入；若尚未落地，会在 80ms 内于落地瞬间自动起跳。
+void player_queue_jump(player_t *p);
 
 // 每帧更新。dt 秒; up_held/down_held 为本帧按键按住状态。
 // speed_level 0..3 对应原版四档速度,影响跳跃初速与动画节奏。
-void player_update(player_t *p, float dt, bool up_held, bool down_held, int speed_level);
+player_event_t player_update(player_t *p, float dt, bool up_held,
+                             bool down_held, int speed_level);
 
 // 取当前应渲染的精灵(含死亡/下蹲/跳跃姿态选择)。
 const sprite_t *player_sprite(const player_t *p);

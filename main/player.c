@@ -45,25 +45,44 @@ void player_reset(player_t *p)
     p->dead = false;
     p->anim_frame = 0;
     p->anim_timer = 0;
+    p->jump_buffer_s = 0;
 }
 
-void player_jump(player_t *p)
+bool player_jump(player_t *p)
 {
     // 原版修复过"下蹲中起跳"的 bug:下蹲时不允许起跳
-    if (!p->on_ground || p->crouching || p->dead) return;
+    if (!p->on_ground || p->crouching || p->dead) return false;
     p->vel_y = p->jump_vel;
     p->on_ground = false;
+    return true;
 }
 
-void player_update(player_t *p, float dt, bool up_held, bool down_held, int speed_level)
+void player_queue_jump(player_t *p)
 {
-    if (p->dead) return;
+    if (!p->dead) p->jump_buffer_s = PLAYER_JUMP_BUFFER_S;
+}
+
+player_event_t player_update(player_t *p, float dt, bool up_held,
+                             bool down_held, int speed_level)
+{
+    if (p->dead) return PLAYER_EVENT_NONE;
+    player_event_t events = PLAYER_EVENT_NONE;
 
     // 跳跃初速随速度档提高(原版: vel 15/19/25 随档位上升)
     p->jump_vel = JUMP_VEL_BASE + JUMP_VEL_STEP * speed_level;
 
-    // 下蹲: 只在地面有效(原版手感:按住蹲下, 松开站起)
+    // 地面输入立即消费，不让本帧 dt 缩短刚按下的缓冲时间。
     p->crouching = down_held && p->on_ground;
+    if (p->jump_buffer_s > 0 && player_jump(p)) {
+        p->jump_buffer_s = 0;
+        events = (player_event_t)(events | PLAYER_EVENT_JUMPED);
+    }
+
+    float buffered = p->jump_buffer_s;
+    if (buffered > 0) {
+        buffered -= dt;
+        if (buffered < 0) buffered = 0;
+    }
 
     // 竖直运动
     if (!p->on_ground) {
@@ -76,7 +95,16 @@ void player_update(player_t *p, float dt, bool up_held, bool down_held, int spee
             p->y = (float)s_ground_y;
             p->vel_y = 0;
             p->on_ground = true;
+            events = (player_event_t)(events | PLAYER_EVENT_LANDED);
         }
+    }
+
+    // 落地后再刷新下蹲状态，然后消费仍有效的预输入。
+    p->crouching = down_held && p->on_ground;
+    p->jump_buffer_s = buffered;
+    if (p->jump_buffer_s > 0 && player_jump(p)) {
+        p->jump_buffer_s = 0;
+        events = (player_event_t)(events | PLAYER_EVENT_JUMPED);
     }
 
     // 动画: 空中定格帧, 地面奔跑循环; 下蹲用下蹲帧循环
@@ -88,6 +116,7 @@ void player_update(player_t *p, float dt, bool up_held, bool down_held, int spee
         int n = p->crouching ? DOWN_FRAME_COUNT : FRAME_COUNT;
         p->anim_frame = (p->anim_frame + 1) % n;
     }
+    return events;
 }
 
 const sprite_t *player_sprite(const player_t *p)

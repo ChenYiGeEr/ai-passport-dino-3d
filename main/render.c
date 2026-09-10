@@ -46,7 +46,7 @@ static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_strip;                  // 320 * STRIP_H, DMA 内存
 static draw_cmd_t s_cmds[MAX_CMDS];
 static int s_cmd_count;
-static bool s_night;                          // 夜间模式(绘制时变暗)
+static uint8_t s_night_mix;                   // 精灵夜间调色强度(0..255)
 static SemaphoreHandle_t s_trans_done;        // SPI DMA 传输完成信号
 
 // 背景参数(本帧)
@@ -86,9 +86,9 @@ void render_init(void)
     }
 }
 
-void render_set_night(bool night)
+void render_set_night_mix(uint8_t mix)
 {
-    s_night = night;
+    s_night_mix = mix;
 }
 
 void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y)
@@ -140,7 +140,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y)
                 s_strip[(y - strip_y) * RENDER_SCREEN_W + x] = v;
         return;
     }
-    // 精灵: 16bpp RGB565, 0x0000 透明; 夜间模式逐像素压暗偏蓝
+    // 精灵: 16bpp RGB565, 0x0000 透明; 按昼夜进度逐像素调向夜色
     const sprite_t *sp = c->s.spr;
     int x0 = c->x > 0 ? c->x : 0;
     int x1 = c->x + sp->w < RENDER_SCREEN_W ? c->x + sp->w : RENDER_SCREEN_W;
@@ -152,13 +152,19 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y)
         for (int x = x0; x < x1; x++) {
             uint16_t v = row[x - c->x];
             if (!v) continue;
-            if (s_night) {
+            if (s_night_mix) {
                 // 压暗偏蓝: r×0.22 g×0.25 b×0.45
-                uint32_t r = ((v >> 11) & 31) * 7 / 32;
-                uint32_t g = ((v >> 5) & 63) * 8 / 64;
-                uint32_t b = ((v & 31) * 14 / 31) + 1;
-                if (b > 31) b = 31;
-                v = (r << 11) | (g << 5) | b;
+                int r = (v >> 11) & 31;
+                int g = (v >> 5) & 63;
+                int b = v & 31;
+                int nr = r * 7 / 32;
+                int ng = g * 8 / 64;
+                int nb = b * 14 / 31 + 1;
+                if (nb > 31) nb = 31;
+                r += (nr - r) * s_night_mix / 255;
+                g += (ng - g) * s_night_mix / 255;
+                b += (nb - b) * s_night_mix / 255;
+                v = (uint16_t)((r << 11) | (g << 5) | b);
             }
             dst[x] = swap16(v);
         }
@@ -184,4 +190,31 @@ void render_flush(void)
     // 帧尾等最后一笔完成, 避免下一帧 begin 时缓冲还在线上
     xSemaphoreTake(s_trans_done, portMAX_DELAY);
     xSemaphoreGive(s_trans_done);
+}
+
+// ---- 串口截屏导出 ----
+static volatile bool s_dump_pending;
+
+void render_dump_request(void) { s_dump_pending = true; }
+bool render_dump_pending(void) { return s_dump_pending; }
+
+void render_dump_frame(render_dump_writer_t writer)
+{
+    s_dump_pending = false;
+    for (int sy = 0; sy < RENDER_SCREEN_H; sy += STRIP_H) {
+        int rows = RENDER_SCREEN_H - sy < STRIP_H ? RENDER_SCREEN_H - sy : STRIP_H;
+        for (int y = 0; y < rows; y++) {
+            uint16_t v = (sy + y) < s_ground_y ? s_sky_color : s_ground_color;
+            for (int x = 0; x < RENDER_SCREEN_W; x++)
+                s_strip[y * RENDER_SCREEN_W + x] = v;
+        }
+        for (int i = 0; i < s_cmd_count; i++)
+            draw_cmd_in_strip(&s_cmds[i], sy);
+        // s_strip 里存的是屏幕端字节序(可能已 swap), 导出为 RGB565LE 需还原
+        int n = RENDER_SCREEN_W * rows;
+#if SWAP_BYTES
+        for (int i = 0; i < n; i++) s_strip[i] = swap16(s_strip[i]);
+#endif
+        writer((const uint8_t *)s_strip, n * 2);
+    }
 }
