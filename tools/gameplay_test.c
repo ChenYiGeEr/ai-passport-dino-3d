@@ -41,6 +41,15 @@ static void test_jump_buffer(void)
     event = player_update(&p, 0.03f, false, false, 0);
     assert(event == PLAYER_EVENT_LANDED);
     assert(p.on_ground);
+
+    // 高速度档长按跳跃也不能越过屏幕上限。
+    player_reset(&p);
+    player_queue_jump(&p);
+    player_update(&p, 0.01f, true, false, 3);
+    for (int i = 0; i < 120; i++) {
+        player_update(&p, 0.01f, true, false, 3);
+        assert(p.y >= 60.0f - 0.001f);
+    }
 }
 
 static void test_day_cycle(void)

@@ -139,6 +139,21 @@ function renderSprite(model, k) {
     return { w, h, px };
 }
 
+// 运行时不做缩放：默认 K=2 主体先离线缩到 3/4，得到约 1.5 像素/体素的等效尺寸。
+function scaleSpriteNearest(sprite, num, den) {
+    const w = Math.max(1, Math.round(sprite.w * num / den));
+    const h = Math.max(1, Math.round(sprite.h * num / den));
+    const px = new Uint16Array(w * h);
+    for (let y = 0; y < h; y++) {
+        const sy = Math.min(sprite.h - 1, Math.floor(y * sprite.h / h));
+        for (let x = 0; x < w; x++) {
+            const sx = Math.min(sprite.w - 1, Math.floor(x * sprite.w / w));
+            px[y * w + x] = sprite.px[sy * sprite.w + sx];
+        }
+    }
+    return { w, h, px };
+}
+
 // 风滚草运行时渲染器不支持旋转；在透明方形画布上离线烘焙 8 个滚动角度。
 function rotateSprite(sprite, angle) {
     const side = Math.ceil(Math.sqrt(sprite.w * sprite.w + sprite.h * sprite.h));
@@ -171,9 +186,8 @@ MODELS.push({ name: 'dino_dead_down', file: 't-rex/other/wow-down.vox' });
 for (const [n, f] of [['cactus', 'cactus'], ['cactus_tall', 'cactus_tall'], ['cactus_thin', 'cactus_thin'],
                       ['fcactus', 'fcactus'], ['fcactus_tall', 'fcactus_tall'], ['fcactus_thin', 'fcactus_thin']])
     MODELS.push({ name: n, file: `cactus/${f}.vox` });
-// 翼龙(取 0/3 两帧扑翼)
-MODELS.push({ name: 'ptero_0', file: 'ptero/0.vox' });
-MODELS.push({ name: 'ptero_1', file: 'ptero/3.vox' });
+// 翼龙: 使用全部六个原始扑翼帧，运行时固定 420ms 周期。
+for (let i = 0; i < 6; i++) MODELS.push({ name: `ptero_${i}`, file: `ptero/${i}.vox` });
 // 地面装饰
 for (let i = 0; i <= 4; i++) MODELS.push({ name: `rock_${i}`, file: `rocks/${i}.vox` });
 for (let i = 0; i <= 2; i++) MODELS.push({ name: `flower_${i}`, file: `flowers/${i}.vox` });
@@ -186,9 +200,13 @@ for (const [n, f] of [['rock_near_0', 'rocks/0.vox'], ['rock_near_2', 'rocks/2.v
                       ['flower_near_0', 'flowers/0.vox'], ['flower_near_2', 'flowers/2.vox']])
     MODELS.push({ name: n, file: f, k: 3 });
 // tumbleweed 在下方单独扩成 8 个离线旋转帧。
-// 远景元素(K=1 小号, 放在远河岸/天边, 纯装饰不碰撞)
-MODELS.push({ name: 'tree_green_far', file: 'misc/trees/green.vox', k: 2 });
-MODELS.push({ name: 'tree_dead_far', file: 'misc/trees/dead.vox', k: 2 });
+// 远景元素: 沙漠只使用高仙人掌，避免树木与场景设定冲突。
+// K=3 让仙人掌高度约 70–90px，与原树的视觉比例相当。
+for (const [n, f] of [['cactus_far_tall_0', 'misc/cactus/0.vox'],
+                      ['cactus_far_tall_1', 'misc/cactus/2.vox'],
+                      ['cactus_far_tall_2', 'misc/cactus/4.vox']])
+    MODELS.push({ name: n, file: f, k: 3 });
+// 保留小号仙人掌给其它离线素材/调试使用。
 MODELS.push({ name: 'cactus_far_0', file: 'misc/cactus/0.vox', k: 1 });
 MODELS.push({ name: 'cactus_far_1', file: 'misc/cactus/2.vox', k: 1 });
 MODELS.push({ name: 'cactus_far_2', file: 'misc/cactus/4.vox', k: 1 });
@@ -198,10 +216,22 @@ MODELS.push({ name: 'cactus_far_2', file: 'misc/cactus/4.vox', k: 1 });
 const models = MODELS.map(m => {
     let model = parseVox(path.join(DINO3D, m.file));
     if (m.name.startsWith('dino_')) model = recolorDino(model);
-    const sp = renderSprite(model, m.k);
+    let sp = renderSprite(model, m.k);
+    if (m.k === undefined) sp = scaleSpriteNearest(sp, 3, 4);
     console.log(`${m.name}: ${sp.w}x${sp.h} (${m.file})`);
     return { name: m.name, w: sp.w, h: sp.h, px: sp.px };
 });
+
+// 现有模型提供八个稳定姿势；补四个轻微位移的中间姿势，保持离线烘焙且不改变碰撞锚点。
+for (let i = 0; i < 4; i++) {
+    const base = models.find(m => m.name === `dino_${i}`);
+    const px = new Uint16Array(base.px.length);
+    for (let y = 0; y < base.h; y++) for (let x = 0; x < base.w; x++) {
+        const src = x > 0 ? base.px[y * base.w + x - 1] : 0;
+        px[y * base.w + x] = src;
+    }
+    models.push({ name: `dino_${i + 8}`, w: base.w, h: base.h, px });
+}
 
 // 沙漠植物使用小幅 ASCII 稿，避免为几百像素引入新的外部 .vox 依赖。
 function addAsciiSprite(name, rows, scale, colors) {
@@ -219,6 +249,44 @@ function addAsciiSprite(name, rows, scale, colors) {
     models.push({ name, w, h, px });
     console.log(`${name}: ${w}x${h} (hand-drawn)`);
 }
+
+const CANYON_ROCK_COLORS = {
+    L: rgb565num(185, 105, 74),
+    G: rgb565num(133, 70, 60),
+    D: rgb565num(73, 45, 52),
+};
+const OASIS_THORN_COLORS = {
+    L: rgb565num(205, 170, 82),
+    G: rgb565num(117, 145, 66),
+    D: rgb565num(52, 76, 48),
+};
+const VOLCANO_VENT_COLORS = {
+    L: rgb565num(245, 205, 70),
+    G: rgb565num(183, 67, 42),
+    D: rgb565num(57, 43, 43),
+};
+function obstacleRows(left, body, right) {
+    const rows = [];
+    rows.push('.......L.......');
+    rows.push('......LLL......');
+    rows.push('.....LGGL......');
+    for (let i = 0; i < 7; i++) rows.push('.....GGG.......');
+    for (let i = 0; i < 9; i++) rows.push(`...${left}..${body}${body}${body}..${right}...`);
+    rows.push('..DDDDDDDDDD...');
+    rows.push('..DDDDDDDDDD...');
+    rows.push('.DDDDDDDDDDDD..');
+    rows.push('.DDDDDDDDDDDD..');
+    return rows;
+}
+addAsciiSprite('canyon_spire_0', obstacleRows('G', 'G', 'D'), 2, CANYON_ROCK_COLORS);
+addAsciiSprite('canyon_spire_1', obstacleRows('L', 'G', 'D'), 2, CANYON_ROCK_COLORS);
+addAsciiSprite('canyon_spire_2', obstacleRows('D', 'G', 'L'), 2, CANYON_ROCK_COLORS);
+addAsciiSprite('oasis_thorn_0', obstacleRows('G', 'G', 'D'), 2, OASIS_THORN_COLORS);
+addAsciiSprite('oasis_thorn_1', obstacleRows('L', 'G', 'D'), 2, OASIS_THORN_COLORS);
+addAsciiSprite('oasis_thorn_2', obstacleRows('D', 'G', 'L'), 2, OASIS_THORN_COLORS);
+addAsciiSprite('volcano_vent_0', obstacleRows('G', 'G', 'L'), 2, VOLCANO_VENT_COLORS);
+addAsciiSprite('volcano_vent_1', obstacleRows('D', 'G', 'L'), 2, VOLCANO_VENT_COLORS);
+addAsciiSprite('volcano_vent_2', obstacleRows('L', 'G', 'D'), 2, VOLCANO_VENT_COLORS);
 
 const DRY_GRASS_COLORS = {
     L: rgb565num(218, 177, 84),
@@ -242,8 +310,57 @@ addAsciiSprite('agave_far', [
     '....L....', '.L..G..L.', '..L.G.L..', 'L..GGG..L', '.GGGGGGG.',
     '..GGGGG..', '...DDD...', '..DDDDD..',
 ], 2, AGAVE_COLORS);
+
+/* 天体图标：16x16、4帧离线烘焙。帧间只改变 corona/暗面像素，运行时无需几何绘制。 */
+const SUN_COLORS = {
+    Y: rgb565num(255, 225, 92), C: rgb565num(255, 245, 170), O: rgb565num(226, 145, 50),
+};
+const MOON_COLORS = {
+    W: rgb565num(232, 238, 220), D: rgb565num(116, 132, 156), B: rgb565num(54, 68, 96),
+};
+const SUN_FRAMES = [
+    ['..OYYO..','.OYYYYO.','OYYYYYYO','YYYYCYYY','YYYYYYYY','YYYYYYYY','OYYYYYYO','.OYYYYO.'],
+    ['.OYYYYO.','OYYYYYYO','YYYYCYYY','YYYYYYYY','YYYYYYYY','YYYYCYYY','OYYYYYYO','.OYYYYO.'],
+    ['..OYYO..','.OYYYYO.','OYYYYYYO','YYYYYYYY','YYYYCYYY','YYYYYYYY','OYYYYYYO','.OYYYYO.'],
+    ['.OYYYYO.','OYYYYYYO','YYYYYYYY','YYYYCYYY','YYYYYYYY','YYYYCYYY','OYYYYYYO','.OYYYYO.'],
+];
+for (let i = 0; i < SUN_FRAMES.length; i++) addAsciiSprite(`sun_${i}`, SUN_FRAMES[i], 2, SUN_COLORS);
+const MOON_FRAMES = [
+    ['...WW...','..WWWW..','.WWWWW..','WWWWWW..','WWWWWW..','.WWWWW..','..WWWW..','...WW...'],
+    ['..WWW...','.WWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','.WWWWW..','..WWW...'],
+    ['..WWWW..','.WWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','.WWWWWW.','..WWWW..'],
+    ['..WWW...','.WWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','.WWWWW..','..WWW...'],
+];
+for (let i = 0; i < MOON_FRAMES.length; i++) addAsciiSprite(`moon_${i}`, MOON_FRAMES[i], 2, MOON_COLORS);
+
+/* 非沙漠场景的离线背景小精灵。每组 3 个，绘制在固定远/中景层，不参与碰撞。 */
+const CANYON_BG = { L: rgb565num(190, 115, 82), G: rgb565num(132, 76, 66), D: rgb565num(72, 48, 54) };
+const OASIS_BG = { L: rgb565num(110, 180, 126), G: rgb565num(58, 122, 87), D: rgb565num(34, 76, 68) };
+const VOLCANO_BG = { L: rgb565num(186, 74, 52), G: rgb565num(104, 48, 45), D: rgb565num(46, 34, 40) };
+const sceneBgRows = {
+    canyon: [
+        ['....L....','...LLL...','..LGGL...','.LGGGGL..','LGGGGGGL.','DDDDDDDDD'],
+        ['..L.....','..LL....','.LGGL...','LGGGGL..','GGGGGG..','DDDDDD..'],
+        ['.....L..','....LLL.','...LGGL.','..LGGGGL','LGGGGGGG','DDDDDDDD'],
+    ],
+    oasis: [
+        ['....L....','...LLL...','..LGGL...','.LGGGGL..','..GGG....','..DDD....'],
+        ['..L...L..','.LGG.GGL.','LGGGGGGGL','.GGGGGGG.','..GGGG...','...DDD...'],
+        ['...L.L...','..LGGL...','.LGGGGL..','LGGGGGGL.','..GGGG...','..DDDD...'],
+    ],
+    volcano: [
+        ['....L....','...LLL...','..LGGL...','.LGGGGL..','LGGGGGGL.','DDDDDDDDD'],
+        ['..L.....','..LL....','.LGGL...','LGGGGL..','GGGGGG..','DDDDDD..'],
+        ['.....L..','....LLL.','...LGGL.','..LGGGGL','LGGGGGGG','DDDDDDDD'],
+    ],
+};
+for (const [scene, rows] of Object.entries(sceneBgRows)) {
+    const colors = scene === 'canyon' ? CANYON_BG : scene === 'oasis' ? OASIS_BG : VOLCANO_BG;
+    rows.forEach((r, i) => addAsciiSprite(`${scene}_bg_${i}`, r, 2, colors));
+}
 {
-    const source = renderSprite(parseVox(path.join(DINO3D, 'misc/tumbleweed.vox')));
+    const source = scaleSpriteNearest(
+        renderSprite(parseVox(path.join(DINO3D, 'misc/tumbleweed.vox'))), 3, 4);
     for (let i = 0; i < 8; i++) {
         const sp = rotateSprite(source, i * Math.PI / 4);
         models.push({ name: `tumbleweed_${i}`, w: sp.w, h: sp.h, px: sp.px });
@@ -333,7 +450,9 @@ console.log('wrote', OUT_H, 'and', OUT_C);
     for (let i = 0; i <= 2; i++) blit(pick(`flower_${i}`), 180 + i * 20, 230);
     blit(pick('dry_grass'), 260, 220); blit(pick('scorpion'), 340, 230);
     for (let i = 0; i < 8; i++) blit(pick(`tumbleweed_${i}`), 400 + i * 28, 225 + (i & 1) * 42);
-    blit(pick('tree_green_far'), 480, 200); blit(pick('tree_dead_far'), 540, 200);
+    blit(pick('cactus_far_tall_0'), 480, 200);
+    blit(pick('cactus_far_tall_1'), 540, 200);
+    blit(pick('cactus_far_tall_2'), 590, 200);
     blit(pick('cactus_far_0'), 480, 260); blit(pick('cactus_far_1'), 510, 260); blit(pick('cactus_far_2'), 540, 260);
     blit(pick('dry_grass_far'), 570, 260); blit(pick('agave_far'), 600, 260);
     blit(pick('rock_far_0'), 10, 300); blit(pick('flower_far_0'), 35, 300);

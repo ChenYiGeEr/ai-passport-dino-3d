@@ -14,6 +14,7 @@ void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
 { (void)spr; (void)x; (void)y; (void)w; (void)h; (void)opacity; }
 void render_fill_rect(int x, int y, int w, int h, uint16_t color)
 { (void)x; (void)y; (void)w; (void)h; (void)color; }
+void render_set_opacity(uint8_t opacity) { (void)opacity; }
 
 // 直接包含实现文件, 拿到 static 内部状态
 #include "../main/obstacles.c"

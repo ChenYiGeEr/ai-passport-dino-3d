@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "sprites.h"
+#include "scene.h"
 
 #define OBSTACLE_POOL 8
 #define OBS_HEART_BASE_W 22
@@ -22,12 +23,16 @@ typedef struct {
     float x, y;          // 锚点: 仙人掌=底部中心, 翼龙=左上角
     const sprite_t *spr; // 当前帧精灵
     const sprite_t *spr2;// 翼龙第二帧(扑翼)
+    const sprite_t *ptero_frames[6];
     float anim_timer;
     int anim_frame;
+    int variant;
 } obstacle_t;
 
 void obstacles_init(int ground_y);
 void obstacles_reset(void);
+void obstacles_set_scene(scene_id_t current, scene_id_t next, uint8_t mix);
+void obstacles_set_shadow_opacity(uint8_t opacity);
 
 // 每帧更新:滚动、生成、动画、回收。speed_px 为当前地面速度(px/s)。
 // lives 用于红心生成门槛(满心不出红心)。

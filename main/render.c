@@ -40,6 +40,7 @@ typedef struct {
     cmd_type_t type;
     int x, y;
     uint8_t opacity;
+    bool tint;
     union {
         struct { const sprite_t *spr; int w, h; } s;
         struct { int w, h; uint16_t color; } r;
@@ -54,6 +55,9 @@ static int s_strip_count;
 static draw_cmd_t s_cmds[MAX_CMDS];
 static int s_cmd_count;
 static uint8_t s_night_mix;                   // 精灵夜间调色强度(0..255)
+static scene_id_t s_scene_current = SCENE_DESERT;
+static scene_id_t s_scene_next = SCENE_DESERT;
+static uint8_t s_scene_mix;
 static uint8_t s_opacity;                     // 后续命令的抖动透明度
 static SemaphoreHandle_t s_free_strips;       // 可安全覆写的 DMA 条带数
 
@@ -111,6 +115,13 @@ void render_set_night_mix(uint8_t mix)
     s_night_mix = mix;
 }
 
+void render_set_scene_mix(scene_id_t current, scene_id_t next, uint8_t mix)
+{
+    s_scene_current = current;
+    s_scene_next = next;
+    s_scene_mix = mix;
+}
+
 void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y)
 {
     s_cmd_count = 0;
@@ -126,6 +137,20 @@ void render_sprite(const sprite_t *spr, int x, int y)
     draw_cmd_t *c = &s_cmds[s_cmd_count++];
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
+    c->tint = true;
+    c->s.spr = spr;
+    c->s.w = spr->w;
+    c->s.h = spr->h;
+    c->opacity = s_opacity;
+}
+
+void render_sprite_raw(const sprite_t *spr, int x, int y)
+{
+    if (s_cmd_count >= MAX_CMDS) return;
+    draw_cmd_t *c = &s_cmds[s_cmd_count++];
+    c->type = CMD_SPRITE;
+    c->x = x; c->y = y;
+    c->tint = false;
     c->s.spr = spr;
     c->s.w = spr->w;
     c->s.h = spr->h;
@@ -139,6 +164,21 @@ void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
     draw_cmd_t *c = &s_cmds[s_cmd_count++];
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
+    c->tint = true;
+    c->s.spr = spr;
+    c->s.w = w;
+    c->s.h = h;
+    c->opacity = opacity;
+}
+
+void render_sprite_scaled_raw(const sprite_t *spr, int x, int y, int w, int h,
+                              uint8_t opacity)
+{
+    if (s_cmd_count >= MAX_CMDS || w <= 0 || h <= 0 || opacity == 0) return;
+    draw_cmd_t *c = &s_cmds[s_cmd_count++];
+    c->type = CMD_SPRITE;
+    c->x = x; c->y = y;
+    c->tint = false;
     c->s.spr = spr;
     c->s.w = w;
     c->s.h = h;
@@ -193,18 +233,25 @@ static inline bool dither_visible(int x, int y, uint8_t opacity)
 
 static inline uint16_t tint_sprite_pixel(uint16_t v)
 {
-    if (!s_night_mix) return v;
+    if (!s_night_mix && !s_scene_mix && s_scene_current == SCENE_DESERT) return v;
     // 压暗偏蓝: r×0.22 g×0.25 b×0.45
     int r = (v >> 11) & 31;
     int g = (v >> 5) & 63;
     int b = v & 31;
-    int nr = r * 7 / 32;
-    int ng = g * 8 / 64;
-    int nb = b * 14 / 31 + 1;
+    int nr = r * 18 / 32;
+    int ng = g * 36 / 64;
+    int nb = b * 20 / 31 + 1;
     if (nb > 31) nb = 31;
     r += (nr - r) * s_night_mix / 255;
     g += (ng - g) * s_night_mix / 255;
     b += (nb - b) * s_night_mix / 255;
+    uint8_t cr, cg, cb, nr2, ng2, nb2;
+    scene_sprite_tint(s_scene_current, &cr, &cg, &cb);
+    scene_sprite_tint(s_scene_next, &nr2, &ng2, &nb2);
+    cr = (uint8_t)(cr + ((int)nr2 - cr) * s_scene_mix / 255);
+    cg = (uint8_t)(cg + ((int)ng2 - cg) * s_scene_mix / 255);
+    cb = (uint8_t)(cb + ((int)nb2 - cb) * s_scene_mix / 255);
+    r = r * cr / 255; g = g * cg / 255; b = b * cb / 255;
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
@@ -251,7 +298,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
             uint16_t *dst = strip + (y - strip_y) * RENDER_SCREEN_W;
             for (int x = x0; x < x1; x++) {
                 uint16_t v = row[x - c->x];
-                if (v) dst[x] = swap16(tint_sprite_pixel(v));
+                if (v) dst[x] = swap16(c->tint ? tint_sprite_pixel(v) : v);
             }
         }
         return;
@@ -265,7 +312,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
             int src_x = (x - c->x) * sp->w / c->s.w;
             uint16_t v = row[src_x];
             if (!v) continue;
-            dst[x] = swap16(tint_sprite_pixel(v));
+            dst[x] = swap16(c->tint ? tint_sprite_pixel(v) : v);
         }
     }
 }

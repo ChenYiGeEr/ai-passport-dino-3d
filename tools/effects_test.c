@@ -8,6 +8,7 @@
 
 static int s_rect_count;
 static int s_sprite_count;
+static int s_raw_sprite_count;
 static int s_first_sprite_y;
 static int s_last_sprite_y;
 static int s_tumbleweed_y;
@@ -20,6 +21,12 @@ void render_sprite(const sprite_t *spr, int x, int y)
     if (spr == &spr_tumbleweed_1) s_tumbleweed_y = y;
     s_sprite_count++;
 }
+void render_sprite_raw(const sprite_t *spr, int x, int y)
+{
+    (void)spr; (void)x; (void)y;
+    s_raw_sprite_count++;
+}
+void render_set_opacity(uint8_t opacity) { (void)opacity; }
 void render_fill_rect(int x, int y, int w, int h, uint16_t color)
 {
     s_rect_count++;
@@ -51,8 +58,8 @@ static void test_tumbleweed(void)
 
     s_sprite_count = 0;
     scenery_draw_ground_back(0);
-    assert(s_sprite_count == GROUND_FAR_COUNT + DECOR_COUNT);
-    assert(s_tumbleweed_y == 181); // anchor 207 - 51/2 - frame 1 bounce 1
+    assert(s_sprite_count == DECOR_COUNT);
+    assert(s_tumbleweed_y == 187); // anchor 207 - 38/2 - frame 1 bounce 1
 
     s_sprite_count = 0;
     scenery_draw_ground_front();
@@ -70,9 +77,9 @@ static void test_depth_speeds(void)
     s_ground_near[0].x = 100.0f;
 
     scenery_update(0.1f, 100.0f);
-    assert(s_ground_far[0].x > 95.49f && s_ground_far[0].x < 95.51f);
-    assert(s_decor[0].x > 91.49f && s_decor[0].x < 91.51f);
-    assert(s_ground_near[0].x > 87.99f && s_ground_near[0].x < 88.01f);
+    assert(s_ground_far[0].x == 100.0f);
+    assert(s_decor[0].x > 92.49f && s_decor[0].x < 92.51f);
+    assert(s_ground_near[0].x > 88.99f && s_ground_near[0].x < 89.01f);
 
     float cloud_x = s_clouds[0].x;
     scenery_update(0.1f, 100.0f);
@@ -90,28 +97,32 @@ static void test_dynamic_top(void)
 
     s_far[0].x = 100;
     s_far[0].y = 145;
-    s_far[0].spr = &spr_tree_green_far;
-    assert(scenery_dynamic_top() == 34);
+    s_far[0].spr = &spr_cactus_far_tall_0;
+    assert(scenery_dynamic_top() == 63);
 }
 
 static void test_stars(void)
 {
     s_rect_count = 0;
-    scenery_draw_sky(0, 1, 2, 0.49f, 3.0f);
+    scenery_draw_sky(0, 1, 2, 0.49f, false, 0.5f, 3.0f);
     int day_rects = s_rect_count;
-    assert(day_rects == CLOUD_COUNT * 2);
+    assert(day_rects == CLOUD_COUNT * 2); // 日间太阳改为离线精灵
+    assert(s_raw_sprite_count == 1);
 
     s_rect_count = 0;
     s_rect_signature = 0;
-    scenery_draw_sky(0, 1, 2, 1.0f, 3.0f);
+    s_raw_sprite_count = 0;
+    scenery_draw_sky(0, 1, 2, 1.0f, true, 0.5f, 3.0f);
     int night_rects = s_rect_count;
     uint32_t night_signature = s_rect_signature;
-    assert(night_rects >= CLOUD_COUNT * 2 + STAR_COUNT);
+    assert(night_rects >= STAR_COUNT); // 夜间隐藏云，只保留星星
+    assert(s_raw_sprite_count == 1);
 
     // 同一游戏时间重复绘制得到同一闪烁状态，暂停不会漂移。
     s_rect_count = 0;
     s_rect_signature = 0;
-    scenery_draw_sky(0, 1, 2, 1.0f, 3.0f);
+    s_raw_sprite_count = 0;
+    scenery_draw_sky(0, 1, 2, 1.0f, true, 0.5f, 3.0f);
     assert(s_rect_count == night_rects);
     assert(s_rect_signature == night_signature);
 }

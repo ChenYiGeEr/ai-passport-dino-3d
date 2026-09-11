@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "main.c"
          "game.c"
          "day_cycle.c"
+         "scene.c"
          "dust.c"
          "idle_sleep.c"
          "player.c"

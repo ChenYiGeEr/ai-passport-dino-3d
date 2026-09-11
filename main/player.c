@@ -11,18 +11,21 @@
 #define GRAVITY         800.0f   // px/s^2
 #define GRAVITY_BOOST   0.65f    // 按住 UP 上升期重力系数(跳得更高)
 #define FAST_FALL_MULT    2.6f   // 空中按住 DOWN 速降
+#define PLAYER_MIN_FOOT_Y 60.0f  // 横屏 240px 高度下，脚部最高到屏幕约 3/4 处
 #define ANIM_BASE_S     0.090f   // 奔跑帧间隔(档 0)
 #define ANIM_SPEEDUP    0.018f   // 每档减少的帧间隔
 
 // 8 帧中 4/5 是收腿(跳跃)姿态, 奔跑步态用 2/6 两帧交替(左右跨步互为镜像)
 static const sprite_t *RUN_FRAMES[] = {
-    &spr_dino_2, &spr_dino_6,
+    &spr_dino_0, &spr_dino_1, &spr_dino_2, &spr_dino_3,
+    &spr_dino_4, &spr_dino_5, &spr_dino_6, &spr_dino_7,
+    &spr_dino_8, &spr_dino_9, &spr_dino_10, &spr_dino_11,
 };
 static const sprite_t *DOWN_FRAMES[] = {
     &spr_dino_down_0, &spr_dino_down_1, &spr_dino_down_2, &spr_dino_down_3,
     &spr_dino_down_4, &spr_dino_down_5, &spr_dino_down_6, &spr_dino_down_7,
 };
-#define FRAME_COUNT 2
+#define FRAME_COUNT 12
 #define DOWN_FRAME_COUNT 8
 
 static int s_ground_x, s_ground_y;
@@ -91,6 +94,11 @@ player_event_t player_update(player_t *p, float dt, bool up_held,
         if (down_held) g *= FAST_FALL_MULT;               // 空中速降
         p->vel_y -= g * dt;
         p->y -= p->vel_y * dt; // 屏幕 y 向下为正, vel_y 向上为正
+        // 限制最高跳跃位置，避免高速度档把恐龙顶到屏幕外。
+        if (p->y < PLAYER_MIN_FOOT_Y) {
+            p->y = PLAYER_MIN_FOOT_Y;
+            p->vel_y = 0;
+        }
         if (p->y >= s_ground_y) {
             p->y = (float)s_ground_y;
             p->vel_y = 0;

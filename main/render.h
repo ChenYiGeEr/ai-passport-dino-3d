@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "sprites.h"
+#include "scene.h"
 
 #define RENDER_SCREEN_W  320
 #define RENDER_SCREEN_H  240
@@ -15,6 +16,7 @@ void render_init(void);
 
 // 设置精灵的夜间调色强度：0=白天原色，255=完整夜色。
 void render_set_night_mix(uint8_t mix);
+void render_set_scene_mix(scene_id_t current, scene_id_t next, uint8_t mix);
 
 // 一帧开始:清空内部状态,准备按条带合成。
 void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y);
@@ -22,9 +24,14 @@ void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y);
 // 在指定横屏坐标绘制精灵(自动裁剪)。x,y 为精灵左上角。
 void render_sprite(const sprite_t *spr, int x, int y);
 
+// 绘制不参与昼夜/场景精灵调色的图标，供高对比度 HUD 使用。
+void render_sprite_raw(const sprite_t *spr, int x, int y);
+
 // 以最近邻方式绘制到指定尺寸；opacity 用 4x4 有序抖动模拟 0..255 透明度。
 void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
                           uint8_t opacity);
+void render_sprite_scaled_raw(const sprite_t *spr, int x, int y, int w, int h,
+                              uint8_t opacity);
 
 // 在指定坐标填充纯色矩形(自动裁剪)。
 void render_fill_rect(int x, int y, int w, int h, uint16_t color);

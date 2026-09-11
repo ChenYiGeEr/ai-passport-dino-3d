@@ -17,11 +17,13 @@
 #include "day_cycle.h"
 #include "dust.h"
 #include "idle_sleep.h"
+#include "scene.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "bsp_display.h"
@@ -39,10 +41,11 @@ static const char *TAG = "game";
 // ---- 速度曲线 ----
 #define SPEED_BASE    180.0f // px/s(起步更快, 节奏对齐原版)
 #define SPEED_STEP      8.0f // 每 100 分增加的 px/s
-#define SPEED_MAX     450.0f
+#define SPEED_MAX     300.0f // 调试与可玩性上限，避免障碍进入过快
 #define SCORE_PER_STEP  100  // 每多少分提速/闪一次
 #define SCORE_RATE     10.0f // 分/秒
-#define DAY_NIGHT_EVERY 700  // 每多少分切换昼夜
+#define DAY_SCORE_SPAN 700   // 白天持续分数
+#define NIGHT_SCORE_SPAN 500  // 夜晚持续分数
 #define MAX_LIVES       3    // 红心数
 #define INVINCIBLE_MS   1500 // 撞心碎裂后的无敌时间
 #define HEART_FX_MS      450 // 拾取位置放大淡出与 HUD 弹跳时长
@@ -86,41 +89,11 @@ static const char *TAG = "game";
 #define INK_SUNSET       RGB565(67, 43, 28)
 #define INK_DUSK         RGB565(170, 154, 170)
 
-static const uint16_t SKY_COLORS[] = { SKY_DAY, SKY_SUNSET, SKY_DUSK, SKY_NIGHT };
-static const uint16_t FAR_COLORS[] = { FAR_DAY, FAR_SUNSET, FAR_DUSK, FAR_NIGHT };
-static const uint16_t RIVER_COLORS[] = { RIVER_DAY, RIVER_SUNSET, RIVER_DUSK, RIVER_NIGHT };
-static const uint16_t WAVE_COLORS[] = { WAVE_DAY, WAVE_SUNSET, WAVE_DUSK, WAVE_NIGHT };
-static const uint16_t GROUND_COLORS[] = { GROUND_DAY, GROUND_SUNSET, GROUND_DUSK, GROUND_NIGHT };
-static const uint16_t CLOUD_COLORS[] = { CLOUD_DAY, CLOUD_SUNSET, CLOUD_DUSK, CLOUD_NIGHT };
-static const uint16_t INK_COLORS[] = { INK_DAY, INK_SUNSET, INK_DUSK, INK_NIGHT };
-static const uint16_t HORIZON_COLORS[] = {
-    RGB565(200, 165, 85), RGB565(180, 120, 72),
-    RGB565(104, 78, 105), RGB565(120, 120, 160),
-};
-static const uint16_t SPECKLE_COLORS[] = {
-    RGB565(180, 150, 90), RGB565(166, 108, 69),
-    RGB565(77, 55, 74), RGB565(44, 43, 72),
-};
-static const uint16_t SHADOW_COLORS[] = {
-    RGB565(120, 95, 45), RGB565(105, 66, 42),
-    RGB565(52, 42, 57), RGB565(13, 16, 35),
-};
-static const uint16_t DUST_NEAR_COLORS[] = {
-    RGB565(211, 170, 86), RGB565(192, 125, 70),
-    RGB565(102, 70, 80), RGB565(54, 50, 72),
-};
-static const uint16_t DUST_FAR_COLORS[] = {
-    RGB565(236, 202, 116), RGB565(218, 153, 91),
-    RGB565(130, 91, 105), RGB565(76, 71, 96),
-};
-static const uint16_t STAR_DIM_COLORS[] = {
-    SKY_DAY, SKY_SUNSET, RGB565(157, 146, 166), RGB565(125, 132, 168),
-};
-static const uint16_t STAR_BRIGHT_COLORS[] = {
-    SKY_DAY, SKY_SUNSET, RGB565(225, 213, 200), RGB565(247, 240, 216),
-};
 #define SETTINGS_PANEL RGB565(239, 202, 126)
 #define SETTINGS_INK   RGB565(70, 45, 24)
+static const uint16_t INK_COLORS[] = {
+    RGB565(60, 50, 30), RGB565(67, 43, 28), RGB565(170, 154, 170), RGB565(200, 200, 220)
+};
 
 typedef enum {
     ST_READY,      // 待机: 恐龙站立, 按 UP 开跑
@@ -136,6 +109,8 @@ static float s_score;
 static uint32_t s_hi_score;
 static float s_speed;
 static bool s_want_night;
+static float s_cycle_segment_start;
+static bool s_scene_switch_pending;
 static day_cycle_t s_day_cycle;
 static float s_game_time_s;
 static uint32_t s_last_flash; // 已提示到的整百
@@ -143,6 +118,132 @@ static float s_flash_until;   // 游戏时间秒；暂停时冻结
 static int s_lives;           // 剩余红心
 static float s_invincible_until; // 游戏时间秒；暂停时冻结
 static idle_sleep_t s_idle_sleep;
+static scene_manager_t s_scene;
+static bool s_death_feedback;
+static float s_death_feedback_s;
+static uint16_t scene_day_color(int layer);
+
+static uint8_t shadow_opacity(void)
+{
+    /* 白天清晰；黄昏两秒内淡出；最深夜完全关闭。 */
+    float p = s_day_cycle.phase;
+    if (p <= 1.0f) return 255;
+    if (p >= 2.0f) return 0;
+    return (uint8_t)((2.0f - p) * 255.0f + 0.5f);
+}
+typedef struct { bool active; float x, y, vx, vy, life; } fragment_t;
+static fragment_t s_fragments[5];
+
+static void fragments_emit(int x, int y)
+{
+    static const int8_t VX[5] = {-42, -20, 0, 23, 45};
+    static const int8_t VY[5] = {-92, -120, -105, -116, -82};
+    for (int i=0;i<5;i++) s_fragments[i]=(fragment_t){true,(float)x,(float)y,VX[i],VY[i],0.35f};
+}
+static void fragments_update(float dt)
+{
+    for (int i=0;i<5;i++) if (s_fragments[i].active) {
+        fragment_t *f=&s_fragments[i]; f->life-=dt; f->x+=f->vx*dt; f->y+=f->vy*dt; f->vy+=320.0f*dt;
+        if (f->life<=0) f->active=false;
+    }
+}
+static void fragments_draw(void)
+{
+    for (int i=0;i<5;i++) if (s_fragments[i].active)
+        render_fill_rect((int)s_fragments[i].x,(int)s_fragments[i].y,3,3,scene_day_color(SCENE_LAYER_HORIZON));
+}
+
+static uint16_t color_blend565(uint16_t a, uint16_t b, uint8_t mix)
+{
+    int ar=(a>>11)&31, ag=(a>>5)&63, ab=a&31;
+    int br=(b>>11)&31, bg=(b>>5)&63, bb=b&31;
+    return (uint16_t)(((ar+(br-ar)*mix/255)<<11)|((ag+(bg-ag)*mix/255)<<5)|(ab+(bb-ab)*mix/255));
+}
+
+static uint16_t color_darken565(uint16_t c, uint8_t percent)
+{
+    int scale = 100 - percent;
+    int r = ((c >> 11) & 31) * scale / 100;
+    int g = ((c >> 5) & 63) * scale / 100;
+    int b = (c & 31) * scale / 100;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static uint16_t scene_day_color(int layer)
+{
+    uint16_t a[4], b[4];
+    for (int i=0;i<4;i++) {
+        a[i]=scene_color(scene_manager_current(&s_scene),layer,i);
+        b[i]=scene_color(scene_manager_next(&s_scene),layer,i);
+    }
+    uint16_t ca=day_cycle_color(&s_day_cycle,a), cb=day_cycle_color(&s_day_cycle,b);
+    float m=scene_manager_mix(&s_scene); return color_blend565(ca,cb,(uint8_t)(m*255.0f+0.5f));
+}
+
+static uint16_t scene_day_far_color(void)
+{
+    uint16_t far = scene_day_color(SCENE_LAYER_FAR);
+    // 非沙漠远景是中景的深化版本，避免与天空和中景装饰撞色。
+    if (scene_manager_current(&s_scene) != SCENE_DESERT ||
+        scene_manager_next(&s_scene) != SCENE_DESERT)
+        far = color_darken565(far, 15);
+    return far;
+}
+
+static void draw_scene_landmarks(scene_id_t scene, uint8_t opacity)
+{
+    render_set_opacity(opacity);
+    const sprite_t *sprites[3] = {0};
+    int xs[3] = { 18, 118, 230 };
+    int bottoms[3] = { 132, 148, 136 };
+    if (scene == SCENE_CANYON) {
+        sprites[0] = &spr_canyon_bg_0; sprites[1] = &spr_canyon_bg_1; sprites[2] = &spr_canyon_bg_2;
+        xs[0] = 16; xs[1] = 128; xs[2] = 244;
+    } else if (scene == SCENE_OASIS) {
+        sprites[0] = &spr_oasis_bg_0; sprites[1] = &spr_oasis_bg_1; sprites[2] = &spr_oasis_bg_2;
+        xs[0] = 24; xs[1] = 138; xs[2] = 256;
+    } else if (scene == SCENE_VOLCANO) {
+        sprites[0] = &spr_volcano_bg_0; sprites[1] = &spr_volcano_bg_1; sprites[2] = &spr_volcano_bg_2;
+        xs[0] = 34; xs[1] = 146; xs[2] = 258;
+    }
+    float far_scroll = scenery_scene_far_scroll();
+    float mid_scroll = scenery_scene_mid_scroll();
+    for (int i = 0; i < 3; i++) {
+        if (!sprites[i]) continue;
+        float off = (i == 1) ? mid_scroll : far_scroll;
+        int x = xs[i] - (int)off;
+        while (x + sprites[i]->w < -4) x += RENDER_SCREEN_W + 40;
+        while (x > RENDER_SCREEN_W + 4) x -= RENDER_SCREEN_W + 40;
+        render_sprite(sprites[i], x, bottoms[i] - sprites[i]->h);
+    }
+    render_set_opacity(255);
+}
+
+static void draw_gradient_band(int y0, int y1, uint16_t from, uint16_t to)
+{
+    const int step = 4;
+    int span = y1 - y0;
+    if (span <= 0) return;
+    for (int y = y0; y < y1; y += step) {
+        int end = y + step;
+        if (end > y1) end = y1;
+        int mid = y + (end - y) / 2;
+        uint8_t mix = (uint8_t)(((mid - y0) * 255) / span);
+        render_fill_rect(0, y, RENDER_SCREEN_W, end - y,
+                         color_blend565(from, to, mix));
+    }
+}
+
+static void draw_background_layers(uint16_t sky, uint16_t far,
+                                   uint16_t horizon, uint16_t ground)
+{
+    // 大块纯色区减少命令数量，天空—远景交界用 24px 渐变消除硬切线。
+    render_fill_rect(0, FAR_TOP, RENDER_SCREEN_W, FIELD_Y - FAR_TOP, far);
+    render_fill_rect(0, 144, RENDER_SCREEN_W, 14, horizon);
+    draw_gradient_band(FAR_TOP - 24, FAR_TOP, sky, far);
+    draw_gradient_band(126, 144, far, horizon);
+    draw_gradient_band(156, FIELD_Y, horizon, ground);
+}
 
 typedef struct {
     bool active;
@@ -184,6 +285,7 @@ static const int BL_LEVELS[]  = { 20, 40, 60, 80, 100 };
 #define BL_COUNT  5
 static int s_vol_idx = 3;   // 默认 60%
 static int s_bl_idx = 3;    // 默认 80%
+static bool s_invincible_mode; // 调试无敌模式，默认关闭
 static int s_menu_row;      // 0=音量 1=背光
 static bool s_editing;      // 是否在某一项的配置态(Up/Down 调值)
 static game_state_t s_return_state; // 退出设置后回到哪里
@@ -218,6 +320,7 @@ static void settings_load(void)
     if (nvs_open("dino", NVS_READONLY, &h) == ESP_OK) {
         if (nvs_get_u32(h, "vol", &v) == ESP_OK && v < VOL_COUNT) s_vol_idx = (int)v;
         if (nvs_get_u32(h, "bl", &v) == ESP_OK && v < BL_COUNT) s_bl_idx = (int)v;
+        if (nvs_get_u32(h, "inv", &v) == ESP_OK) s_invincible_mode = v != 0;
         nvs_close(h);
     }
 }
@@ -228,6 +331,7 @@ static void settings_save(void)
     if (nvs_open("dino", NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_u32(h, "vol", (uint32_t)s_vol_idx);
         nvs_set_u32(h, "bl", (uint32_t)s_bl_idx);
+        nvs_set_u32(h, "inv", s_invincible_mode ? 1u : 0u);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -352,6 +456,8 @@ static void game_reset(void)
     s_score = 0;
     s_speed = SPEED_BASE;
     s_want_night = false;
+    s_cycle_segment_start = 0;
+    s_scene_switch_pending = false;
     day_cycle_reset(&s_day_cycle);
     s_game_time_s = 0;
     s_last_flash = 0;
@@ -362,6 +468,14 @@ static void game_reset(void)
     s_hud_heart_pop_active = false;
     dust_reset();
     render_set_night_mix(0);
+    scene_manager_reset(&s_scene);
+    scenery_set_scene(SCENE_DESERT);
+    obstacles_set_scene(SCENE_DESERT, SCENE_DESERT, 0);
+    obstacles_set_shadow_opacity(255);
+    render_set_scene_mix(SCENE_DESERT, SCENE_DESERT, 0);
+    s_death_feedback = false;
+    s_death_feedback_s = 0;
+    for (int i=0;i<5;i++) s_fragments[i].active=false;
 }
 
 // 设置菜单使用固定暖亮配色，不受昼夜调色影响。
@@ -378,11 +492,16 @@ static void draw_settings(void)
     hud_text("SETTINGS", px + 14, py + 10, SETTINGS_INK);
 
     char buf[24];
-    const char *labels[2] = { "VOLUME", "LIGHT" };
-    int vals[2] = { VOL_LEVELS[s_vol_idx], BL_LEVELS[s_bl_idx] };
-    for (int i = 0; i < 2; i++) {
+    const char *labels[3] = { "INVINCIBLE", "VOLUME", "LIGHT" };
+    for (int i = 0; i < 3; i++) {
         int ry = py + 34 + i * 22;
-        snprintf(buf, sizeof(buf), "%s < %d%% >", labels[i], vals[i]);
+        if (i == 0)
+            snprintf(buf, sizeof(buf), "%s < %s >", labels[i],
+                     s_invincible_mode ? "ON" : "OFF");
+        else if (i == 1)
+            snprintf(buf, sizeof(buf), "%s < %d%% >", labels[i], VOL_LEVELS[s_vol_idx]);
+        else
+            snprintf(buf, sizeof(buf), "%s < %d%% >", labels[i], BL_LEVELS[s_bl_idx]);
         if (i == s_menu_row) {
             // 选中行反色
             render_fill_rect(px + 8, ry - 3, pw - 16, 16, SETTINGS_INK);
@@ -413,7 +532,7 @@ static void draw_lives(void)
     for (int i = 0; i < s_lives; i++) {
         int x = 6 + i * 15;
         if (!s_hud_heart_pop_active || i != s_hud_heart_pop_index) {
-            render_sprite(&spr_heart, x, 6);
+            render_sprite_raw(&spr_heart, x, 6);
             continue;
         }
         float progress = (s_game_time_s - s_hud_heart_pop_started_at) /
@@ -425,54 +544,45 @@ static void draw_lives(void)
         int lift = (int)(16.0f * progress * (1.0f - progress) + 0.5f);
         int cx = x + spr_heart.w / 2;
         int cy = 6 + spr_heart.h / 2;
-        render_sprite_scaled(&spr_heart, cx - w / 2, cy - h / 2 - lift,
-                             w, h, 255);
+        render_sprite_scaled_raw(&spr_heart, cx - w / 2, cy - h / 2 - lift,
+                                 w, h, 255);
     }
 }
 
 static void draw_frame(int refresh_start_y)
 {
-    uint16_t sky = day_cycle_color(&s_day_cycle, SKY_COLORS);
-    uint16_t ground = day_cycle_color(&s_day_cycle, GROUND_COLORS);
+    uint16_t sky = scene_day_color(SCENE_LAYER_SKY);
+    uint16_t ground = scene_day_color(SCENE_LAYER_GROUND);
     uint16_t ink = day_cycle_color(&s_day_cycle, INK_COLORS);
+    float segment_score = s_score - s_cycle_segment_start;
+    float segment_limit = s_want_night ? NIGHT_SCORE_SPAN : DAY_SCORE_SPAN;
+    float celestial_progress = segment_limit > 0 ? segment_score / segment_limit : 0.0f;
+    if (celestial_progress < 0) celestial_progress = 0;
+    if (celestial_progress > 1) celestial_progress = 1;
 
     // 背景: FAR_TOP 以下全是地面色, 远场带/河面覆盖上去
     render_begin(sky, ground, FAR_TOP);
-    scenery_draw_sky(day_cycle_color(&s_day_cycle, CLOUD_COLORS),
-                     day_cycle_color(&s_day_cycle, STAR_DIM_COLORS),
-                     day_cycle_color(&s_day_cycle, STAR_BRIGHT_COLORS),
-                     day_cycle_night_progress(&s_day_cycle), s_game_time_s);
+    scenery_draw_sky(scene_day_color(SCENE_LAYER_CLOUD),
+                     RGB565(120, 145, 180),
+                     RGB565(210, 220, 240),
+                     day_cycle_night_progress(&s_day_cycle), s_want_night,
+                     celestial_progress, s_game_time_s);
 
-    // 远场带(树站立的河岸)
-    render_fill_rect(0, FAR_TOP, RENDER_SCREEN_W, RIVER_Y - FAR_TOP,
-                     day_cycle_color(&s_day_cycle, FAR_COLORS));
+    draw_background_layers(sky, scene_day_far_color(),
+                           scene_day_color(SCENE_LAYER_HORIZON), ground);
     scenery_draw_far();
+    draw_scene_landmarks(scene_manager_current(&s_scene), 255);
+    if (scene_manager_transitioning(&s_scene))
+        draw_scene_landmarks(scene_manager_next(&s_scene),
+                             (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
 
-    // 伪透视: 河面向右上方收拢(对齐原版地面向远方消失点的观感)
-    {
-        uint16_t riv_c = day_cycle_color(&s_day_cycle, RIVER_COLORS);
-        uint16_t hor_c = day_cycle_color(&s_day_cycle, HORIZON_COLORS);
-        uint16_t wave = day_cycle_color(&s_day_cycle, WAVE_COLORS);
-        int wave_off = (int)(s_game_time_s / 0.03f) % 48;
-        for (int x = 0; x < RENDER_SCREEN_W; x += 4) {
-            int riv_top = RIVER_Y + x / 53;     // 150 → 156
-            int riv_bot = FIELD_Y - x / 80;     // 174 → 170 河面变窄
-            render_fill_rect(x, riv_top, 4, riv_bot - riv_top, riv_c);
-            render_fill_rect(x, riv_bot, 4, 2, hor_c);
-        }
-        // 波光顺坡流动
-        for (int i = 0; i < 8; i++) {
-            int x = ((i * 48) - wave_off) % (RENDER_SCREEN_W + 24);
-            if (x < 0) x += RENDER_SCREEN_W + 24;
-            render_fill_rect(x, RIVER_Y + 3 + (i * 7) % 8 + x / 53, 12, 2, wave);
-        }
-    }
+    scenery_draw_ground_back(scene_day_color(SCENE_LAYER_SPECKLE));
+    dust_draw(scene_day_color(SCENE_LAYER_DUST_NEAR), scene_day_color(SCENE_LAYER_DUST_FAR));
 
-    scenery_draw_ground_back(day_cycle_color(&s_day_cycle, SPECKLE_COLORS));
-    dust_draw(day_cycle_color(&s_day_cycle, DUST_NEAR_COLORS),
-              day_cycle_color(&s_day_cycle, DUST_FAR_COLORS));
-
+    uint8_t shadow = shadow_opacity();
+    obstacles_set_shadow_opacity(shadow);
     obstacles_draw();
+    fragments_draw();
 
     int dx, dy;
     player_draw_pos(&s_player, &dx, &dy);
@@ -482,8 +592,10 @@ static void draw_frame(int refresh_start_y)
         int air = GROUND_Y - (int)s_player.y;
         int sh_w = sp->w * 4 / 5 - air / 3;
         if (sh_w < 8) sh_w = 8;
+        render_set_opacity(shadow);
         render_fill_rect((int)s_player.x - sh_w / 2 + 4, GROUND_Y + 1,
-                         sh_w, 3, day_cycle_color(&s_day_cycle, SHADOW_COLORS));
+                         sh_w, 3, scene_day_color(SCENE_LAYER_SPECKLE));
+        render_set_opacity(255);
     }
     // 无敌期间恐龙闪烁(隔 100ms 隐去)
     bool blink_out = s_game_time_s < s_invincible_until &&
@@ -502,6 +614,8 @@ static void draw_frame(int refresh_start_y)
     bool blink = s_game_time_s < s_flash_until &&
                  (((uint32_t)(s_game_time_s * 5.0f)) & 1);
     hud_draw_scores((uint32_t)s_score, s_hi_score, !blink, ink);
+    if (s_invincible_mode)
+        hud_text("INV", 166, 8, RGB565(150, 240, 255));
 
     if (s_state == ST_PAUSED) hud_draw_paused(ink);
     if (s_state == ST_GAME_OVER) hud_draw_game_over(ink);
@@ -524,6 +638,7 @@ void game_run(void)
     fap_screenshot_init(); // 串口截屏协议(社区发布用)
     settings_load();
     settings_apply(); // 音量 + 背光按上次设置生效
+    srand(esp_random());
 
     s_hi_score = hi_score_load();
     player_init(&s_player, DINO_X, GROUND_Y);
@@ -641,6 +756,15 @@ void game_run(void)
             if (press == KEY_UP) player_queue_jump(&s_player);
 
             s_game_time_s += dt;
+            fragments_update(dt);
+            if (s_death_feedback) {
+                s_death_feedback_s -= dt;
+                if (s_death_feedback_s <= 0) {
+                    s_death_feedback = false;
+                    s_state = ST_GAME_OVER;
+                }
+                break;
+            }
             heart_effect_redraw = heart_effects_update();
 
             // 分数与速度
@@ -658,8 +782,26 @@ void game_run(void)
             }
 
             // 昼夜调色随天空的 100ms 节拍推进，避免局刷边界出现色带。
-            s_want_night = (((uint32_t)s_score / DAY_NIGHT_EVERY) & 1) == 1;
+            float segment_score = s_score - s_cycle_segment_start;
+            float segment_limit = s_want_night ? NIGHT_SCORE_SPAN : DAY_SCORE_SPAN;
+            if (segment_score >= segment_limit) {
+                bool was_night = s_want_night;
+                s_cycle_segment_start = s_score;
+                s_want_night = !s_want_night;
+                if (was_night && !s_want_night)
+                    s_scene_switch_pending = true;
+            }
             sky_elapsed_s += dt;
+            if (scene_manager_transitioning(&s_scene)) {
+                scene_manager_update(&s_scene, dt, false, false);
+                render_set_scene_mix(scene_manager_current(&s_scene),
+                                     scene_manager_next(&s_scene),
+                                     (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
+                obstacles_set_scene(scene_manager_current(&s_scene),
+                                    scene_manager_next(&s_scene),
+                                    (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
+                scenery_set_scene(scene_manager_current(&s_scene));
+            }
 
             {
                 player_event_t events = player_update(&s_player, dt, up_held,
@@ -697,12 +839,16 @@ void game_run(void)
                             s_hud_heart_pop_started_at = s_game_time_s;
                             sfx_play(SFX_HEART);
                         }
-                    } else if (s_game_time_s >= s_invincible_until) {
+                    } else if (!s_invincible_mode && s_game_time_s >= s_invincible_until) {
+                        int fx, fy;
+                        obstacles_visual_center(hit, &fx, &fy);
+                        fragments_emit(fx, fy);
                         obstacles_remove(hit);
                         s_lives--;
                         if (s_lives <= 0) {
                             s_player.dead = true;
-                            s_state = ST_GAME_OVER;
+                            s_death_feedback = true;
+                            s_death_feedback_s = 0.35f;
                             sfx_play(SFX_DEATH);
                             if ((uint32_t)s_score > s_hi_score) {
                                 s_hi_score = (uint32_t)s_score;
@@ -735,14 +881,19 @@ void game_run(void)
             // 配置态: UP 调高 / DOWN 调低, OK 单击退出配置
             // (此状态下所有按键都被这里消费, 不会触发跳跃/下蹲/暂停/音效)
             if (!s_editing) {
-                if (press == KEY_UP || press == KEY_DOWN)
-                    s_menu_row ^= 1;
+                if (press == KEY_UP) {
+                    s_menu_row = (s_menu_row + 2) % 3;
+                } else if (press == KEY_DOWN) {
+                    s_menu_row = (s_menu_row + 1) % 3;
+                }
                 if (click == KEY_OK)
                     s_editing = true;
             } else {
                 int dir = (press == KEY_UP) ? 1 : (press == KEY_DOWN) ? -1 : 0;
                 if (dir != 0) {
                     if (s_menu_row == 0) {
+                        s_invincible_mode = dir > 0;
+                    } else if (s_menu_row == 1) {
                         s_vol_idx += dir;
                         if (s_vol_idx < 0) s_vol_idx = 0;
                         if (s_vol_idx >= VOL_COUNT) s_vol_idx = VOL_COUNT - 1;
@@ -793,8 +944,18 @@ void game_run(void)
                     scenery_update_sky(sky_scroll_px);
                     sky_scroll_px = 0;
                     day_cycle_update(&s_day_cycle, s_want_night, sky_elapsed_s);
+                    scene_manager_update(&s_scene, 0,
+                                         s_scene_switch_pending, false);
+                    s_scene_switch_pending = false;
                     sky_elapsed_s = 0;
                     render_set_night_mix(day_cycle_night_mix(&s_day_cycle));
+                    render_set_scene_mix(scene_manager_current(&s_scene),
+                                         scene_manager_next(&s_scene),
+                                         (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
+                    obstacles_set_scene(scene_manager_current(&s_scene),
+                                        scene_manager_next(&s_scene),
+                                        (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
+                    scenery_set_scene(scene_manager_current(&s_scene));
                     current_scenery_top = scenery_dynamic_top();
                     int64_t missed = (frame_start - next_sky_refresh_us) /
                                      SKY_REFRESH_US + 1;
