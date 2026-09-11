@@ -25,6 +25,9 @@
 #define HEART_CHANCE    2
 // 红心高度: 70% 贴地, 30% 低空(需起跳吃)
 #define HEART_LOW_RATIO 70
+#define HEART_PULSE_MS  420
+#define HEART_FLOAT_MS  700
+#define HEART_WRAP_MS  2100
 
 static obstacle_t s_pool[OBSTACLE_POOL];
 static int s_ground_y;
@@ -42,6 +45,23 @@ static obstacle_t *alloc_obstacle(void)
     for (int i = 0; i < OBSTACLE_POOL; i++)
         if (!s_pool[i].active) return &s_pool[i];
     return NULL;
+}
+
+static void heart_geometry(const obstacle_t *o, int *x, int *y, int *w, int *h)
+{
+    static const int8_t PULSE_EXTRA[8] = { 0, 1, 1, 2, 2, 1, 1, 0 };
+    static const int8_t BOB_Y[10] = { 0, -1, -2, -2, -1, 0, 1, 2, 2, 1 };
+    int elapsed_ms = (int)(o->anim_timer * 1000.0f);
+    int pulse_frame = (elapsed_ms % HEART_PULSE_MS) * 8 / HEART_PULSE_MS;
+    int bob_frame = (elapsed_ms % HEART_FLOAT_MS) * 10 / HEART_FLOAT_MS;
+    int extra = PULSE_EXTRA[pulse_frame];
+    int center_x = (int)o->x;
+    int center_y = (int)o->y - OBS_HEART_BASE_H / 2 + BOB_Y[bob_frame];
+
+    *w = OBS_HEART_BASE_W + extra;
+    *h = OBS_HEART_BASE_H + extra;
+    *x = center_x - *w / 2;
+    *y = center_y - *h / 2;
 }
 
 void obstacles_init(int ground_y)
@@ -124,8 +144,12 @@ void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level,
                 o->anim_timer = 0;
                 o->anim_frame ^= 1;
             }
+        } else if (o->type == OBS_HEART) {
+            o->anim_timer += dt;
+            if (o->anim_timer >= HEART_WRAP_MS / 1000.0f)
+                o->anim_timer -= HEART_WRAP_MS / 1000.0f;
         }
-        int w = o->spr->w;
+        int w = o->type == OBS_HEART ? OBS_HEART_MAX_W : o->spr->w;
         if (o->x + w < -20) o->active = false;
     }
 
@@ -155,6 +179,12 @@ void obstacles_draw(void)
         obstacle_t *o = &s_pool[i];
         if (!o->active) continue;
         const sprite_t *sp = (o->type == OBS_PTERO && o->anim_frame) ? o->spr2 : o->spr;
+        if (o->type == OBS_HEART) {
+            int sx, sy, sw, sh;
+            heart_geometry(o, &sx, &sy, &sw, &sh);
+            render_sprite_scaled(sp, sx, sy, sw, sh, 255);
+            continue;
+        }
         int sx = (int)o->x - sp->w / 2;
         int sy = (int)o->y - sp->h;
         // 椭圆阴影(伪 3D 关键线索, 对齐原版的 blob shadow); 红心贴地/悬浮不画
@@ -170,11 +200,14 @@ void obstacles_draw(void)
 static void obs_hitbox(const obstacle_t *o, int *x, int *y, int *w, int *h)
 {
     const sprite_t *sp = (o->type == OBS_PTERO && o->anim_frame) ? o->spr2 : o->spr;
+    if (o->type == OBS_HEART) {
+        heart_geometry(o, x, y, w, h);
+        return;
+    }
     *x = (int)o->x - sp->w / 2;
     *y = (int)o->y - sp->h;
     *w = sp->w;
     *h = sp->h;
-    if (o->type == OBS_HEART) return; // 红心用全幅判定, 好'吃'
     // 仙人掌视觉上有盆/阴影, 向内收一点
     if (o->type == OBS_CACTUS) {
         *x += 4; *w -= 8;
@@ -201,6 +234,19 @@ int obstacles_collide(int px, int py, int pw, int ph)
 obs_type_t obstacles_type(int idx)
 {
     return s_pool[idx].type;
+}
+
+void obstacles_visual_center(int idx, int *x, int *y)
+{
+    if (idx < 0 || idx >= OBSTACLE_POOL || !s_pool[idx].active) {
+        *x = 0;
+        *y = 0;
+        return;
+    }
+    int left, top, w, h;
+    obs_hitbox(&s_pool[idx], &left, &top, &w, &h);
+    *x = left + w / 2;
+    *y = top + h / 2;
 }
 
 void obstacles_remove(int idx)

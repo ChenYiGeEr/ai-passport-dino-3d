@@ -30,8 +30,17 @@ const PALETTE = [
     [156, 139, 112],  // 11 R 石头灰
     [122, 108, 85],   // 12 r 石头暗灰
     [255, 220, 100],  // 13 Y 花蕊黄
+    [218, 177, 84],   // 14 L 枯草亮面
+    [174, 127, 52],   // 15 A 枯草主体
+    [116, 78, 34],    // 16 D 枯草暗面
+    [139, 164, 108],  // 17 H 龙舌兰亮面
+    [82, 119, 79],    // 18 V 龙舌兰主体
+    [48, 76, 54],     // 19 d 龙舌兰暗面
 ];
-const CHAR_MAP = { G: 1, g: 2, l: 3, W: 4, B: 5, C: 6, c: 7, P: 8, T: 9, t: 10, R: 11, r: 12, Y: 13 };
+const CHAR_MAP = {
+    G: 1, g: 2, l: 3, W: 4, B: 5, C: 6, c: 7, P: 8, T: 9, t: 10,
+    R: 11, r: 12, Y: 13, L: 14, A: 15, D: 16, H: 17, V: 18, d: 19,
+};
 
 /* ---------------- 精灵 ASCII 稿 ---------------- */
 // 恐龙(面向右, 经典 Chrome 造型, 1x 约 20x22, 2x 后 40x44)
@@ -173,13 +182,17 @@ const ROCK_1 = ['.RRR..', 'RRRRRR', 'RRRrrR', '.rrrr.'];
 const ROCK_2 = ['..RR...', '.RRRR..', 'RRRRRRR', 'RRRRrRR', '.rrrrr.'];
 const FLOWER_0 = ['..P..', '.PYP.', '..P..', '..g..', '..g..'];
 const FLOWER_1 = ['.P.', 'PYP', '.P.', '.g.', '.g.'];
-const SKULL = [
-    '.WWWWW.',
-    'WWWWWWW',
-    'WWBWBWW',
-    'WWWWWWW',
-    '.WWWWWW',
-    '..W.W.W',
+const DRY_GRASS = [
+    '.....L.....', '.L...L...L.', '..L..L..L..', 'D.L..A..L.D',
+    '.D.A.A.A.D.', '..DAAAAAD..', '...DAAAD...', '....DAD....',
+    '....DDD....', '....DDD....', '...DDDDD...', '..DDDDDDD..',
+];
+const DRY_GRASS_FAR = [
+    '...L...', 'L..L..L', '.L.A.L.', '.DAAAD.', '..DAD..', '..DDD..', '.DDDDD.',
+];
+const AGAVE_FAR = [
+    '....H....', '.H..V..H.', '..H.V.H..', 'H..VVV..H', '.VVVVVVV.',
+    '..VVVVV..', '...ddd...', '..ddddd..',
 ];
 
 /* ---------------- 组装帧 ---------------- */
@@ -225,7 +238,9 @@ const SPRITES = {
     rock_2: ROCK_2,
     flower_0: FLOWER_0,
     flower_1: FLOWER_1,
-    skull: SKULL,
+    dry_grass: DRY_GRASS,
+    dry_grass_far: DRY_GRASS_FAR,
+    agave_far: AGAVE_FAR,
 };
 
 /* ---------------- 编码输出 ---------------- */
@@ -312,7 +327,7 @@ console.log('wrote', OUT_H, 'and', OUT_C);
     blit('fcactus', 350, 10); blit('fcactus_tall', 390, 10); blit('fcactus_thin', 430, 10);
     blit('ptero_0', 480, 10); blit('ptero_1', 540, 10);
     blit('rock_0', 240, 80); blit('rock_1', 280, 80); blit('rock_2', 330, 80);
-    blit('flower_0', 390, 80); blit('flower_1', 420, 80); blit('skull', 460, 80);
+    blit('flower_0', 390, 80); blit('flower_1', 420, 80); blit('dry_grass', 460, 80);
     fs.writeFileSync('/tmp/sprites-preview.ppm', Buffer.concat([Buffer.from(`P6\n${W} ${H}\n255\n`), img]));
     console.log('preview: /tmp/sprites-preview.ppm');
 
@@ -350,7 +365,7 @@ console.log('wrote', OUT_H, 'and', OUT_C);
     blit2('cactus_tall', 190, 205 - 44);
     blit2('cactus', 208, 205 - 30);
     blit2('ptero_0', 260, 160);
-    blit2('rock_1', 100, 218); blit2('flower_0', 250, 220); blit2('skull', 290, 226);
+    blit2('rock_1', 100, 218); blit2('flower_0', 250, 220); blit2('dry_grass', 290, 216);
     fs.writeFileSync('/tmp/scene-preview.ppm', Buffer.concat([Buffer.from(`P6\n${SW} ${SH}\n255\n`), scene]));
     console.log('scene preview: /tmp/scene-preview.ppm');
 }

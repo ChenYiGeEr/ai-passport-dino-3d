@@ -9,6 +9,10 @@
 #include "sprites.h"
 
 #define OBSTACLE_POOL 8
+#define OBS_HEART_BASE_W 22
+#define OBS_HEART_BASE_H 20
+#define OBS_HEART_MAX_W  24
+#define OBS_HEART_MAX_H  22
 
 typedef enum { OBS_CACTUS, OBS_PTERO, OBS_HEART } obs_type_t;
 
@@ -37,6 +41,9 @@ int obstacles_collide(int px, int py, int pw, int ph);
 
 // 取障碍物类型。
 obs_type_t obstacles_type(int idx);
+
+// 返回障碍物当前可见中心点；拾取特效用该位置固定在屏幕上。
+void obstacles_visual_center(int idx, int *x, int *y);
 
 // 移除障碍物(吃掉红心/撞碎仙人掌时用)。
 void obstacles_remove(int idx);

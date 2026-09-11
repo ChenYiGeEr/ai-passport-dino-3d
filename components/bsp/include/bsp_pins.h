@@ -3,6 +3,7 @@
 // 每项都注明"为什么是这个值",便于二次开发时判断能不能改。
 #pragma once
 
+#include "sdkconfig.h"
 #include "driver/spi_master.h"
 #include "driver/i2c_types.h"
 #include "hal/adc_types.h"
@@ -20,9 +21,12 @@
 // -1 = 复位脚未接 MCU(硬接 3.3V),由 esp_lcd_panel_reset() 走 SWRESET 软复位。
 #define BSP_LCD_RST          (-1)
 #define BSP_LCD_BL           21          // 背光,LEDC PWM 调光
-// 保留60MHz目标值；ESP32-C3默认80MHz SPI源只支持整数分频，实机取整为40MHz。
-// 下一档80MHz可能超出面板/排线裕量；仅在实机确认无花屏、横纹后尝试。
-#define BSP_LCD_PCLK_HZ      (60 * 1000 * 1000)
+// 默认使用真实 80MHz；若面板/排线出现花屏或横纹，在 menuconfig 中启用 40MHz 兼容模式。
+#if CONFIG_BSP_LCD_SPI_CLOCK_40MHZ
+#define BSP_LCD_PCLK_HZ      (40 * 1000 * 1000)
+#else
+#define BSP_LCD_PCLK_HZ      (80 * 1000 * 1000)
+#endif
 // ST7789 SCK 空闲低、上升沿采样 → SPI mode 0。
 #define BSP_LCD_SPI_MODE     0
 // 本屏出厂即需反色(参考例程 TFT_init() 末尾无条件发 0x21 INVON)。

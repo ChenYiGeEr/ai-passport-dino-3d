@@ -9,6 +9,9 @@
 // mock render
 #include "../main/render.h"
 void render_sprite(const sprite_t *spr, int x, int y) { (void)spr; (void)x; (void)y; }
+void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
+                          uint8_t opacity)
+{ (void)spr; (void)x; (void)y; (void)w; (void)h; (void)opacity; }
 void render_fill_rect(int x, int y, int w, int h, uint16_t color)
 { (void)x; (void)y; (void)w; (void)h; (void)color; }
 
@@ -53,5 +56,21 @@ int main(void)
         }
     }
     printf("120s @full lives: heart=%d (expect 0)\n", hearts_at_full);
+
+    // 红心的绘制框和碰撞框共用同一几何，并随脉动逐帧变化。
+    obstacles_reset();
+    spawn_heart();
+    obstacle_t *heart = NULL;
+    for (int i = 0; i < OBSTACLE_POOL; i++)
+        if (s_pool[i].active && s_pool[i].type == OBS_HEART) heart = &s_pool[i];
+    if (!heart) return 1;
+    int x0, y0, w0, h0;
+    obs_hitbox(heart, &x0, &y0, &w0, &h0);
+    if (w0 != OBS_HEART_BASE_W || h0 != OBS_HEART_BASE_H) return 2;
+    heart->anim_timer = 0.21f;
+    int x1, y1, w1, h1;
+    obs_hitbox(heart, &x1, &y1, &w1, &h1);
+    if (w1 != OBS_HEART_MAX_W || h1 != OBS_HEART_MAX_H) return 3;
+    if (x1 + w1 / 2 != x0 + w0 / 2) return 4;
     return 0;
 }

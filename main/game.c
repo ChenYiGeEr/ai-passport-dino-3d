@@ -45,6 +45,15 @@ static const char *TAG = "game";
 #define DAY_NIGHT_EVERY 700  // 每多少分切换昼夜
 #define MAX_LIVES       3    // 红心数
 #define INVINCIBLE_MS   1500 // 撞心碎裂后的无敌时间
+#define HEART_FX_MS      450 // 拾取位置放大淡出与 HUD 弹跳时长
+
+// ---- 刷新调度 ----
+#define RUN_FRAME_PERIOD_US  16667 // 60 FPS，绝对截止时间调度
+#define SKY_REFRESH_US      100000 // 天空/HUD 至少每 100ms 整屏更新
+#define STATIC_POLL_MS          20 // 静止页面只轮询输入，不持续推屏
+#define SETTINGS_FADE_US    150000 // 进入/退出设置 150ms
+#define SETTINGS_FADE_STEPS      5 // 量化为 5 档，约 30 FPS
+#define SETTINGS_DIM_RETAIN    128 // 完全展开时背景保留约 50% 亮度
 
 // ---- 颜色(对齐 dino3d 沙漠色调) ----
 #define SKY_DAY       RGB565(238, 203, 110)  // 沙漠黄(原作天空与沙同色)
@@ -110,10 +119,8 @@ static const uint16_t STAR_DIM_COLORS[] = {
 static const uint16_t STAR_BRIGHT_COLORS[] = {
     SKY_DAY, SKY_SUNSET, RGB565(225, 213, 200), RGB565(247, 240, 216),
 };
-static const uint16_t PANEL_COLORS[] = {
-    RGB565(40, 32, 16), RGB565(48, 27, 22),
-    RGB565(25, 20, 37), RGB565(10, 10, 30),
-};
+#define SETTINGS_PANEL RGB565(239, 202, 126)
+#define SETTINGS_INK   RGB565(70, 45, 24)
 
 typedef enum {
     ST_READY,      // 待机: 恐龙站立, 按 UP 开跑
@@ -138,11 +145,34 @@ static float s_invincible_until; // 游戏时间秒；暂停时冻结
 static idle_sleep_t s_idle_sleep;
 
 typedef struct {
+    bool active;
+    float started_at;
+    int x, y;
+} heart_pickup_fx_t;
+
+typedef struct {
+    bool active;
+    bool entering;
+    int64_t started_at_us;
+} settings_fade_t;
+
+static heart_pickup_fx_t s_heart_pickup_fx;
+static bool s_hud_heart_pop_active;
+static float s_hud_heart_pop_started_at;
+static int s_hud_heart_pop_index;
+static settings_fade_t s_settings_fade;
+static uint8_t s_settings_mix;
+
+typedef struct {
     int64_t window_start_us;
     int64_t slowest_frame_us;
+    int64_t frame_total_us;
     int64_t render_total_us;
     int64_t render_max_us;
+    int64_t dynamic_start_y_total;
     uint32_t frames;
+    uint32_t sky_refreshes;
+    uint32_t dynamic_refreshes;
 } perf_stats_t;
 
 static perf_stats_t s_perf;
@@ -209,6 +239,54 @@ static void settings_apply(void)
     bsp_display_backlight((uint8_t)BL_LEVELS[s_bl_idx]);
 }
 
+static void settings_fade_start(bool entering, int64_t now_us)
+{
+    s_settings_fade.active = true;
+    s_settings_fade.entering = entering;
+    s_settings_fade.started_at_us = now_us;
+    s_settings_mix = entering ? 0 : 255;
+}
+
+// 返回 true 表示亮度档位或页面状态发生变化，需要重绘整屏。
+static bool settings_fade_update(int64_t now_us)
+{
+    if (!s_settings_fade.active) return false;
+    int64_t elapsed = now_us - s_settings_fade.started_at_us;
+    int step = elapsed >= SETTINGS_FADE_US
+        ? SETTINGS_FADE_STEPS - 1
+        : (int)(elapsed * (SETTINGS_FADE_STEPS - 1) / SETTINGS_FADE_US);
+    uint8_t target = (uint8_t)((step * 255 + (SETTINGS_FADE_STEPS - 1) / 2) /
+                               (SETTINGS_FADE_STEPS - 1));
+    if (!s_settings_fade.entering) target = 255 - target;
+    bool changed = target != s_settings_mix;
+    s_settings_mix = target;
+
+    if (elapsed >= SETTINGS_FADE_US) {
+        bool entering = s_settings_fade.entering;
+        s_settings_fade.active = false;
+        if (!entering) s_state = s_return_state;
+        changed = true;
+    }
+    return changed;
+}
+
+static bool heart_effects_update(void)
+{
+    float duration = HEART_FX_MS / 1000.0f;
+    bool changed = false;
+    if (s_heart_pickup_fx.active &&
+        s_game_time_s - s_heart_pickup_fx.started_at >= duration) {
+        s_heart_pickup_fx.active = false;
+        changed = true;
+    }
+    if (s_hud_heart_pop_active &&
+        s_game_time_s - s_hud_heart_pop_started_at >= duration) {
+        s_hud_heart_pop_active = false;
+        changed = true;
+    }
+    return changed;
+}
+
 static bool sleep_eligible(game_state_t state)
 {
     return state != ST_RUNNING;
@@ -220,7 +298,7 @@ static void perf_reset(void)
 }
 
 static void perf_record(int64_t frame_start_us, int64_t render_start_us,
-                        int64_t frame_end_us)
+                        int64_t frame_end_us, int refresh_start_y)
 {
     if (s_perf.window_start_us == 0)
         s_perf.window_start_us = frame_start_us;
@@ -228,17 +306,33 @@ static void perf_record(int64_t frame_start_us, int64_t render_start_us,
     int64_t render_us = frame_end_us - render_start_us;
     if (frame_us > s_perf.slowest_frame_us) s_perf.slowest_frame_us = frame_us;
     if (render_us > s_perf.render_max_us) s_perf.render_max_us = render_us;
+    s_perf.frame_total_us += frame_us;
     s_perf.render_total_us += render_us;
     s_perf.frames++;
+    if (refresh_start_y == 0) {
+        s_perf.sky_refreshes++;
+    } else {
+        s_perf.dynamic_refreshes++;
+        s_perf.dynamic_start_y_total += refresh_start_y;
+    }
 
     int64_t elapsed_us = frame_end_us - s_perf.window_start_us;
     if (elapsed_us < 2000000 || s_perf.frames == 0)
         return;
-    ESP_LOGI(TAG, "fps=%.1f slow=%.1fms render_avg=%.1fms render_max=%.1fms",
+    double dynamic_y_avg = s_perf.dynamic_refreshes
+        ? (double)s_perf.dynamic_start_y_total / (double)s_perf.dynamic_refreshes
+        : 0.0;
+    ESP_LOGI(TAG,
+             "fps=%.1f frame_avg=%.1fms slow=%.1fms render_avg=%.1fms "
+             "render_max=%.1fms start_y_avg=%.1f sky=%u dynamic=%u spi=%dMHz",
              (double)s_perf.frames * 1000000.0 / (double)elapsed_us,
+             (double)s_perf.frame_total_us / (double)s_perf.frames / 1000.0,
              (double)s_perf.slowest_frame_us / 1000.0,
              (double)s_perf.render_total_us / (double)s_perf.frames / 1000.0,
-             (double)s_perf.render_max_us / 1000.0);
+             (double)s_perf.render_max_us / 1000.0,
+             dynamic_y_avg, (unsigned)s_perf.sky_refreshes,
+             (unsigned)s_perf.dynamic_refreshes,
+             bsp_display_pclk_hz() / 1000000);
     perf_reset();
 }
 
@@ -264,50 +358,79 @@ static void game_reset(void)
     s_flash_until = 0;
     s_lives = MAX_LIVES;
     s_invincible_until = 0;
+    s_heart_pickup_fx.active = false;
+    s_hud_heart_pop_active = false;
     dust_reset();
     render_set_night_mix(0);
 }
 
-// 设置菜单绘制: 半透明感的深色面板 + 两行档位, 选中行反色
-static void draw_settings(uint16_t ink)
+// 设置菜单使用固定暖亮配色，不受昼夜调色影响。
+static void draw_settings(void)
 {
     const int px = 60, py = 66, pw = 200, ph = 108;
-    uint16_t panel = day_cycle_color(&s_day_cycle, PANEL_COLORS);
-    uint16_t hi_fg = panel;
     // 面板 + 边框
-    render_fill_rect(px, py, pw, ph, panel);
-    render_fill_rect(px, py, pw, 2, ink);
-    render_fill_rect(px, py + ph - 2, pw, 2, ink);
-    render_fill_rect(px, py, 2, ph, ink);
-    render_fill_rect(px + pw - 2, py, 2, ph, ink);
+    render_fill_rect(px, py, pw, ph, SETTINGS_PANEL);
+    render_fill_rect(px, py, pw, 2, SETTINGS_INK);
+    render_fill_rect(px, py + ph - 2, pw, 2, SETTINGS_INK);
+    render_fill_rect(px, py, 2, ph, SETTINGS_INK);
+    render_fill_rect(px + pw - 2, py, 2, ph, SETTINGS_INK);
 
-    hud_text("SETTINGS", px + 14, py + 10, ink);
+    hud_text("SETTINGS", px + 14, py + 10, SETTINGS_INK);
 
     char buf[24];
     const char *labels[2] = { "VOLUME", "LIGHT" };
     int vals[2] = { VOL_LEVELS[s_vol_idx], BL_LEVELS[s_bl_idx] };
     for (int i = 0; i < 2; i++) {
         int ry = py + 34 + i * 22;
-        // 配置态: 值部分闪烁提示可调
-        bool blink = s_editing && i == s_menu_row &&
-                     ((esp_timer_get_time() / 300000) & 1);
         snprintf(buf, sizeof(buf), "%s < %d%% >", labels[i], vals[i]);
         if (i == s_menu_row) {
             // 选中行反色
-            render_fill_rect(px + 8, ry - 3, pw - 16, 16, ink);
-            if (blink) {
-                // 闪烁时只画标签, 隐去值
-                hud_text(labels[i], px + 14, ry, hi_fg);
-            } else {
-                hud_text(buf, px + 14, ry, hi_fg);
-            }
+            render_fill_rect(px + 8, ry - 3, pw - 16, 16, SETTINGS_INK);
+            hud_text(buf, px + 14, ry, SETTINGS_PANEL);
         } else {
-            hud_text(buf, px + 14, ry, ink);
+            hud_text(buf, px + 14, ry, SETTINGS_INK);
         }
     }
 }
 
-static void draw_frame(void)
+static void draw_heart_pickup_fx(void)
+{
+    if (!s_heart_pickup_fx.active) return;
+    float progress = (s_game_time_s - s_heart_pickup_fx.started_at) /
+                     (HEART_FX_MS / 1000.0f);
+    if (progress < 0) progress = 0;
+    if (progress >= 1.0f) return;
+    int w = OBS_HEART_BASE_W + (int)((32 - OBS_HEART_BASE_W) * progress + 0.5f);
+    int h = OBS_HEART_BASE_H + (int)((29 - OBS_HEART_BASE_H) * progress + 0.5f);
+    static const uint8_t OPACITY[4] = { 255, 192, 128, 64 };
+    int stage = (int)(progress * 4.0f);
+    render_sprite_scaled(&spr_heart, s_heart_pickup_fx.x - w / 2,
+                         s_heart_pickup_fx.y - h / 2, w, h, OPACITY[stage]);
+}
+
+static void draw_lives(void)
+{
+    for (int i = 0; i < s_lives; i++) {
+        int x = 6 + i * 15;
+        if (!s_hud_heart_pop_active || i != s_hud_heart_pop_index) {
+            render_sprite(&spr_heart, x, 6);
+            continue;
+        }
+        float progress = (s_game_time_s - s_hud_heart_pop_started_at) /
+                         (HEART_FX_MS / 1000.0f);
+        if (progress < 0) progress = 0;
+        if (progress > 1) progress = 1;
+        int w = 22 - (int)(11.0f * progress + 0.5f);
+        int h = 20 - (int)(10.0f * progress + 0.5f);
+        int lift = (int)(16.0f * progress * (1.0f - progress) + 0.5f);
+        int cx = x + spr_heart.w / 2;
+        int cy = 6 + spr_heart.h / 2;
+        render_sprite_scaled(&spr_heart, cx - w / 2, cy - h / 2 - lift,
+                             w, h, 255);
+    }
+}
+
+static void draw_frame(int refresh_start_y)
 {
     uint16_t sky = day_cycle_color(&s_day_cycle, SKY_COLORS);
     uint16_t ground = day_cycle_color(&s_day_cycle, GROUND_COLORS);
@@ -370,9 +493,10 @@ static void draw_frame(void)
 
     scenery_draw_ground_front();
 
+    draw_heart_pickup_fx();
+
     // 左上角红心(剩余生命)
-    for (int i = 0; i < s_lives; i++)
-        render_sprite(&spr_heart, 6 + i * 15, 6);
+    draw_lives();
 
     // HUD: 破整百时闪烁当前分
     bool blink = s_game_time_s < s_flash_until &&
@@ -381,9 +505,15 @@ static void draw_frame(void)
 
     if (s_state == ST_PAUSED) hud_draw_paused(ink);
     if (s_state == ST_GAME_OVER) hud_draw_game_over(ink);
-    if (s_state == ST_SETTINGS) draw_settings(ink);
+    if (s_state == ST_SETTINGS && s_settings_mix > 0) {
+        uint8_t retain = (uint8_t)(255 - (127 * s_settings_mix + 127) / 255);
+        render_dim(retain);
+        render_set_opacity(s_settings_mix);
+        draw_settings();
+        render_set_opacity(255);
+    }
 
-    render_flush();
+    render_flush_from(refresh_start_y);
 }
 
 void game_run(void)
@@ -403,10 +533,31 @@ void game_run(void)
     s_state = ST_READY;
 
     int64_t last = esp_timer_get_time();
+    int64_t next_frame_deadline_us = last;
+    int64_t next_sky_refresh_us = last + SKY_REFRESH_US;
+    int previous_dino_top;
+    int previous_scenery_top = scenery_dynamic_top();
+    float sky_scroll_px = 0;
+    float sky_elapsed_s = 0;
+    {
+        int ignored_x;
+        player_draw_pos(&s_player, &ignored_x, &previous_dino_top);
+    }
+    bool redraw_requested = true;
     idle_sleep_init(&s_idle_sleep, last, true);
     perf_reset();
 
     while (1) {
+        if (s_state == ST_RUNNING) {
+            int64_t now = esp_timer_get_time();
+            int64_t wait_us = next_frame_deadline_us - now;
+            if (wait_us > 0) {
+                // 向上取整到系统的 1ms tick；绝对截止时间会抵消单次超调。
+                TickType_t wait_ticks = pdMS_TO_TICKS((wait_us + 999) / 1000);
+                if (wait_ticks > 0) vTaskDelay(wait_ticks);
+            }
+        }
+
         int64_t frame_start = esp_timer_get_time();
         float dt = (frame_start - last) / 1000000.0f;
         last = frame_start;
@@ -433,44 +584,56 @@ void game_run(void)
             idle_sleep_consumes_input(&s_idle_sleep)) {
             input_discard_events();
             if (idle_event == IDLE_SLEEP_EVENT_WAKE) {
-                draw_frame();
+                draw_frame(0);
+                int ignored_x;
+                player_draw_pos(&s_player, &ignored_x, &previous_dino_top);
+                previous_scenery_top = scenery_dynamic_top();
+                redraw_requested = false;
                 fap_screenshot_pump();
             } else if (idle_sleep_is_asleep(&s_idle_sleep)) {
                 // 截屏仍可导出息屏前冻结的最后一帧，不会重新推送 LCD。
                 fap_screenshot_pump();
             }
             perf_reset();
-            vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(STATIC_POLL_MS));
             continue;
         }
 
         bool up_held = held == KEY_UP;
         bool down_held = held == KEY_DOWN;
         game_state_t state_before = s_state;
+        int lives_before = s_lives;
+        bool transition_was_active = s_settings_fade.active;
+        bool transition_redraw = settings_fade_update(frame_start);
+        bool heart_effect_redraw = false;
 
         // 长按 OK: 进入/退出设置菜单(任何状态下可用)
-        if (long_press == KEY_OK) {
+        if (transition_was_active || s_settings_fade.active) {
+            // 150ms 过渡期间忽略菜单/游戏输入；Power 键不经过本输入模块。
+        } else if (long_press == KEY_OK) {
             if (s_state == ST_SETTINGS) {
                 settings_save();
-                s_state = s_return_state;
+                settings_fade_start(false, frame_start);
             } else {
                 // 运行中进入设置等价于先暂停; 退出后回到暂停
                 s_return_state = (s_state == ST_RUNNING) ? ST_PAUSED : s_state;
                 s_menu_row = 0;
                 s_editing = false;
                 s_state = ST_SETTINGS;
+                settings_fade_start(true, frame_start);
             }
         } else switch (s_state) {
         case ST_READY:
             if (press == KEY_UP) {
                 s_state = ST_RUNNING;
                 player_queue_jump(&s_player);
+                if (player_update(&s_player, dt, false, false, 0) &
+                    PLAYER_EVENT_JUMPED) {
+                    sfx_play(SFX_JUMP);
+                    dust_emit_start((int)s_player.x, GROUND_Y);
+                }
+                dust_update(dt);
             }
-            if (player_update(&s_player, dt, false, false, 0) & PLAYER_EVENT_JUMPED) {
-                sfx_play(SFX_JUMP);
-                dust_emit_start((int)s_player.x, GROUND_Y);
-            }
-            dust_update(dt);
             break;
 
         case ST_RUNNING:
@@ -478,6 +641,7 @@ void game_run(void)
             if (press == KEY_UP) player_queue_jump(&s_player);
 
             s_game_time_s += dt;
+            heart_effect_redraw = heart_effects_update();
 
             // 分数与速度
             s_score += SCORE_RATE * dt;
@@ -493,12 +657,9 @@ void game_run(void)
                 }
             }
 
-            // 昼夜切换
-            {
-                s_want_night = (((uint32_t)s_score / DAY_NIGHT_EVERY) & 1) == 1;
-                day_cycle_update(&s_day_cycle, s_want_night, dt);
-                render_set_night_mix(day_cycle_night_mix(&s_day_cycle));
-            }
+            // 昼夜调色随天空的 100ms 节拍推进，避免局刷边界出现色带。
+            s_want_night = (((uint32_t)s_score / DAY_NIGHT_EVERY) & 1) == 1;
+            sky_elapsed_s += dt;
 
             {
                 player_event_t events = player_update(&s_player, dt, up_held,
@@ -510,6 +671,7 @@ void game_run(void)
             }
             obstacles_update(dt, s_speed, (uint32_t)s_score, speed_level(), s_lives);
             scenery_update(dt, s_speed);
+            sky_scroll_px += s_speed * dt;
             dust_update(dt);
 
             // 碰撞: 红心=吃掉, 障碍=扣心(心碎裂消失 + 无敌 1.5s)
@@ -519,9 +681,22 @@ void game_run(void)
                 int hit = obstacles_collide(hx, hy, hw, hh);
                 if (hit >= 0) {
                     if (obstacles_type(hit) == OBS_HEART) {
+                        int heart_x, heart_y;
+                        obstacles_visual_center(hit, &heart_x, &heart_y);
                         obstacles_remove(hit);
-                        if (s_lives < MAX_LIVES) s_lives++;
-                        sfx_play(SFX_JUMP);
+                        if (s_lives < MAX_LIVES) {
+                            s_hud_heart_pop_index = s_lives;
+                            s_lives++;
+                            s_heart_pickup_fx = (heart_pickup_fx_t) {
+                                .active = true,
+                                .started_at = s_game_time_s,
+                                .x = heart_x,
+                                .y = heart_y,
+                            };
+                            s_hud_heart_pop_active = true;
+                            s_hud_heart_pop_started_at = s_game_time_s;
+                            sfx_play(SFX_HEART);
+                        }
                     } else if (s_game_time_s >= s_invincible_until) {
                         obstacles_remove(hit);
                         s_lives--;
@@ -587,13 +762,85 @@ void game_run(void)
         if (s_state != state_before && sleep_eligible(s_state))
             idle_sleep_reset(&s_idle_sleep, frame_start);
 
-        int64_t render_start = esp_timer_get_time();
-        draw_frame();
-        fap_screenshot_pump(); // 若收到截屏请求, 此刻导出本帧
-        int64_t frame_end = esp_timer_get_time();
-        if (s_state == ST_RUNNING)
-            perf_record(frame_start, render_start, frame_end);
-        else
+        bool state_changed = s_state != state_before;
+        bool input_activity = press != KEY_NONE || click != KEY_NONE ||
+                              long_press != KEY_NONE;
+        bool force_full_refresh = state_changed || s_lives != lives_before ||
+                                  transition_redraw || s_hud_heart_pop_active ||
+                                  heart_effect_redraw;
+
+        if (s_state != ST_RUNNING && (force_full_refresh || input_activity))
+            redraw_requested = true;
+
+        int refresh_start_y = 0;
+        int current_dino_top = previous_dino_top;
+        int current_scenery_top = scenery_dynamic_top();
+        bool should_draw = s_state == ST_RUNNING || redraw_requested;
+        if (should_draw) {
+            int ignored_x;
+            player_draw_pos(&s_player, &ignored_x, &current_dino_top);
+
+            if (s_state == ST_RUNNING) {
+                if (state_before != ST_RUNNING) {
+                    force_full_refresh = true;
+                    next_sky_refresh_us = frame_start + SKY_REFRESH_US;
+                    if (state_before == ST_READY || state_before == ST_GAME_OVER) {
+                        sky_scroll_px = 0;
+                        sky_elapsed_s = 0;
+                    }
+                } else if (frame_start >= next_sky_refresh_us) {
+                    force_full_refresh = true;
+                    scenery_update_sky(sky_scroll_px);
+                    sky_scroll_px = 0;
+                    day_cycle_update(&s_day_cycle, s_want_night, sky_elapsed_s);
+                    sky_elapsed_s = 0;
+                    render_set_night_mix(day_cycle_night_mix(&s_day_cycle));
+                    current_scenery_top = scenery_dynamic_top();
+                    int64_t missed = (frame_start - next_sky_refresh_us) /
+                                     SKY_REFRESH_US + 1;
+                    next_sky_refresh_us += missed * SKY_REFRESH_US;
+                }
+
+                if (!force_full_refresh) {
+                    refresh_start_y = FAR_TOP;
+                    if (current_dino_top < refresh_start_y)
+                        refresh_start_y = current_dino_top;
+                    if (previous_dino_top < refresh_start_y)
+                        refresh_start_y = previous_dino_top;
+                    if (current_scenery_top < refresh_start_y)
+                        refresh_start_y = current_scenery_top;
+                    if (previous_scenery_top < refresh_start_y)
+                        refresh_start_y = previous_scenery_top;
+                    if (refresh_start_y < 0) refresh_start_y = 0;
+                }
+            }
+
+            int64_t render_start = esp_timer_get_time();
+            draw_frame(refresh_start_y);
+            previous_dino_top = current_dino_top;
+            previous_scenery_top = current_scenery_top;
+            redraw_requested = false;
+            fap_screenshot_pump(); // 若收到截屏请求, 此刻导出本帧
+            int64_t frame_end = esp_timer_get_time();
+
+            if (s_state == ST_RUNNING) {
+                perf_record(frame_start, render_start, frame_end, refresh_start_y);
+                if (state_before != ST_RUNNING)
+                    next_frame_deadline_us = frame_start + RUN_FRAME_PERIOD_US;
+                else
+                    next_frame_deadline_us += RUN_FRAME_PERIOD_US;
+                // 慢帧只丢弃已错过的截止点，不连续补跑多帧。
+                if (next_frame_deadline_us < frame_end)
+                    next_frame_deadline_us = frame_end;
+            } else {
+                perf_reset();
+            }
+        } else {
+            fap_screenshot_pump();
             perf_reset();
+        }
+
+        if (s_state != ST_RUNNING)
+            vTaskDelay(pdMS_TO_TICKS(STATIC_POLL_MS));
     }
 }

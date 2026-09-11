@@ -1,5 +1,5 @@
 // main/scenery.h
-// 场景装饰:云朵(视差)、地面纹理斑点、地面小装饰(石头/花/骷髅/蝎子/风滚草)。
+// 场景装饰:云朵(视差)、地面纹理斑点、沙漠植物、石头、蝎子和风滚草。
 // 均为纯视觉元素,不参与碰撞。
 #pragma once
 
@@ -11,6 +11,12 @@ void scenery_reset(void);
 
 // 每帧更新。speed_px 为地面速度; 暂停/结束时传 0 即冻结。
 void scenery_update(float dt, float speed_px);
+
+// 天空低频节拍到达时推进云层。scroll_px 为自上次天空刷新起累计的地面位移。
+void scenery_update_sky(float scroll_px);
+
+// 当前可见远景物体的最顶部；没有跨入屏幕的物体时返回屏幕高度。
+int scenery_dynamic_top(void);
 
 // 天空层(星星 + 云)。night_progress 0..1；game_time_s 暂停时不推进。
 void scenery_draw_sky(uint16_t cloud_color, uint16_t star_dim,

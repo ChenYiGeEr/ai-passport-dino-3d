@@ -177,7 +177,6 @@ MODELS.push({ name: 'ptero_1', file: 'ptero/3.vox' });
 // 地面装饰
 for (let i = 0; i <= 4; i++) MODELS.push({ name: `rock_${i}`, file: `rocks/${i}.vox` });
 for (let i = 0; i <= 2; i++) MODELS.push({ name: `flower_${i}`, file: `flowers/${i}.vox` });
-MODELS.push({ name: 'skull', file: 'misc/desert_skull.vox' });
 MODELS.push({ name: 'scorpion', file: 'misc/scorpion.vox' });
 // 跑道纵深层：远层 K=1，近层只选少量石块/花草 K=3，控制 flash 和合成成本。
 for (const [n, f] of [['rock_far_0', 'rocks/0.vox'], ['rock_far_2', 'rocks/2.vox'],
@@ -193,7 +192,6 @@ MODELS.push({ name: 'tree_dead_far', file: 'misc/trees/dead.vox', k: 2 });
 MODELS.push({ name: 'cactus_far_0', file: 'misc/cactus/0.vox', k: 1 });
 MODELS.push({ name: 'cactus_far_1', file: 'misc/cactus/2.vox', k: 1 });
 MODELS.push({ name: 'cactus_far_2', file: 'misc/cactus/4.vox', k: 1 });
-MODELS.push({ name: 'skull_far', file: 'misc/desert_skull.vox', k: 1 });
 
 /* ---------------- 烘焙(16bpp RGB565 直出, 已含方向性明暗) ---------------- */
 
@@ -204,6 +202,46 @@ const models = MODELS.map(m => {
     console.log(`${m.name}: ${sp.w}x${sp.h} (${m.file})`);
     return { name: m.name, w: sp.w, h: sp.h, px: sp.px };
 });
+
+// 沙漠植物使用小幅 ASCII 稿，避免为几百像素引入新的外部 .vox 依赖。
+function addAsciiSprite(name, rows, scale, colors) {
+    const sourceW = Math.max(...rows.map(row => row.length));
+    const w = sourceW * scale;
+    const h = rows.length * scale;
+    const px = new Uint16Array(w * h);
+    rows.forEach((row, y) => [...row.padEnd(sourceW, '.')].forEach((ch, x) => {
+        const color = colors[ch];
+        if (!color) return;
+        for (let dy = 0; dy < scale; dy++)
+            for (let dx = 0; dx < scale; dx++)
+                px[(y * scale + dy) * w + x * scale + dx] = color;
+    }));
+    models.push({ name, w, h, px });
+    console.log(`${name}: ${w}x${h} (hand-drawn)`);
+}
+
+const DRY_GRASS_COLORS = {
+    L: rgb565num(218, 177, 84),
+    G: rgb565num(174, 127, 52),
+    D: rgb565num(116, 78, 34),
+};
+const AGAVE_COLORS = {
+    L: rgb565num(139, 164, 108),
+    G: rgb565num(82, 119, 79),
+    D: rgb565num(48, 76, 54),
+};
+addAsciiSprite('dry_grass', [
+    '.....L.....', '.L...L...L.', '..L..L..L..', 'D.L..G..L.D',
+    '.D.G.G.G.D.', '..DGGGGGD..', '...DGGGD...', '....DGD....',
+    '....DDD....', '....DDD....', '...DDDDD...', '..DDDDDDD..',
+], 2, DRY_GRASS_COLORS);
+addAsciiSprite('dry_grass_far', [
+    '...L...', 'L..L..L', '.L.G.L.', '.DGGGD.', '..DGD..', '..DDD..', '.DDDDD.',
+], 2, DRY_GRASS_COLORS);
+addAsciiSprite('agave_far', [
+    '....L....', '.L..G..L.', '..L.G.L..', 'L..GGG..L', '.GGGGGGG.',
+    '..GGGGG..', '...DDD...', '..DDDDD..',
+], 2, AGAVE_COLORS);
 {
     const source = renderSprite(parseVox(path.join(DINO3D, 'misc/tumbleweed.vox')));
     for (let i = 0; i < 8; i++) {
@@ -293,11 +331,11 @@ console.log('wrote', OUT_H, 'and', OUT_C);
     blit(pick('ptero_0'), 430, 150); blit(pick('ptero_1'), 500, 150);
     for (let i = 0; i <= 4; i++) blit(pick(`rock_${i}`), 10 + i * 30, 230);
     for (let i = 0; i <= 2; i++) blit(pick(`flower_${i}`), 180 + i * 20, 230);
-    blit(pick('skull'), 260, 220); blit(pick('scorpion'), 340, 230);
+    blit(pick('dry_grass'), 260, 220); blit(pick('scorpion'), 340, 230);
     for (let i = 0; i < 8; i++) blit(pick(`tumbleweed_${i}`), 400 + i * 28, 225 + (i & 1) * 42);
     blit(pick('tree_green_far'), 480, 200); blit(pick('tree_dead_far'), 540, 200);
     blit(pick('cactus_far_0'), 480, 260); blit(pick('cactus_far_1'), 510, 260); blit(pick('cactus_far_2'), 540, 260);
-    blit(pick('skull_far'), 570, 260);
+    blit(pick('dry_grass_far'), 570, 260); blit(pick('agave_far'), 600, 260);
     blit(pick('rock_far_0'), 10, 300); blit(pick('flower_far_0'), 35, 300);
     blit(pick('rock_near_0'), 70, 300); blit(pick('flower_near_0'), 120, 300);
     fs.writeFileSync('/tmp/sprites-preview.ppm', Buffer.concat([Buffer.from(`P6\n${W} ${H}\n255\n`), img]));

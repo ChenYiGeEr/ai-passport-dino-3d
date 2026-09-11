@@ -1,5 +1,5 @@
 // main/sfx.h
-// 音效:跳跃(短促上升方波)与死亡(下滑音)两个核心音效。
+// 音效:跳跃、拾取红心与死亡。
 // PCM 在初始化时合成到静态缓冲,播放走独立任务,不阻塞游戏循环。
 #pragma once
 
@@ -7,6 +7,7 @@
 
 typedef enum {
     SFX_JUMP = 0,
+    SFX_HEART,
     SFX_DEATH,
 } sfx_id_t;
 

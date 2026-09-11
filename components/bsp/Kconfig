@@ -1,0 +1,18 @@
+menu "AI Passport BSP"
+
+    choice BSP_LCD_SPI_CLOCK
+        prompt "LCD SPI clock"
+        default BSP_LCD_SPI_CLOCK_80MHZ
+        help
+            Select the SPI clock used by the ST7789 display. 80MHz improves
+            frame rate, while 40MHz is the compatibility fallback for panels
+            or wiring that show corruption at 80MHz.
+
+        config BSP_LCD_SPI_CLOCK_80MHZ
+            bool "80MHz (performance)"
+
+        config BSP_LCD_SPI_CLOCK_40MHZ
+            bool "40MHz (compatibility)"
+    endchoice
+
+endmenu

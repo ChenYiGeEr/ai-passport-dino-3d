@@ -60,17 +60,17 @@ static const sprite_t *TUMBLEWEED_FRAMES[] = {
 static const sprite_t *DECOR_SPRITES[] = {
     &spr_rock_0, &spr_rock_1, &spr_rock_2, &spr_rock_3, &spr_rock_4,
     &spr_flower_0, &spr_flower_1, &spr_flower_2,
-    &spr_scorpion,
-    // 骷髅头只保留 K=1 小号远景版(spr_skull_far), 不在近景出现
+    &spr_scorpion, &spr_dry_grass,
 };
-#define DECOR_SPRITE_COUNT 10 // 9 个普通精灵 + 1 个风滚草选项
+#define DECOR_NORMAL_COUNT ((int)(sizeof(DECOR_SPRITES) / sizeof(DECOR_SPRITES[0])))
+#define DECOR_SPRITE_COUNT (DECOR_NORMAL_COUNT + 1) // 普通精灵 + 1 个风滚草选项
 
 static const sprite_t *FAR_SPRITES[] = {
     &spr_tree_green_far, &spr_tree_dead_far,
     &spr_cactus_far_0, &spr_cactus_far_1, &spr_cactus_far_2,
-    &spr_skull_far,
 };
-#define FAR_SPRITE_COUNT 6
+#define FAR_BASE_COUNT ((int)(sizeof(FAR_SPRITES) / sizeof(FAR_SPRITES[0])))
+#define FAR_SPRITE_COUNT (FAR_BASE_COUNT + 1) // 最后一个槽位由两种新植物共享
 
 static const sprite_t *GROUND_FAR_SPRITES[] = {
     &spr_rock_far_0, &spr_rock_far_2,
@@ -120,7 +120,10 @@ static void spawn_depth_decor(depth_decor_t *d, bool near, bool initial)
 
 static void spawn_far(far_t *f, bool initial)
 {
-    const sprite_t *sp = FAR_SPRITES[rand() % FAR_SPRITE_COUNT];
+    int choice = rand() % FAR_SPRITE_COUNT;
+    const sprite_t *sp = choice < FAR_BASE_COUNT
+        ? FAR_SPRITES[choice]
+        : (rand() & 1) ? &spr_dry_grass_far : &spr_agave_far;
     f->spr = sp;
     f->x = initial ? (float)(rand() % RENDER_SCREEN_W)
                    : (float)(RENDER_SCREEN_W + 30 + rand() % 150);
@@ -153,10 +156,6 @@ void scenery_reset(void)
 
 void scenery_update(float dt, float speed_px)
 {
-    for (int i = 0; i < CLOUD_COUNT; i++) {
-        s_clouds[i].x -= speed_px * CLOUD_PARALLAX * dt;
-        if (s_clouds[i].x + s_clouds[i].w < -20) spawn_cloud(&s_clouds[i], false);
-    }
     for (int i = 0; i < DECOR_COUNT; i++) {
         float travel = speed_px * dt * (s_decor[i].tumbleweed
                                         ? TUMBLEWEED_SPEED : GROUND_MID_SPEED);
@@ -189,6 +188,28 @@ void scenery_update(float dt, float speed_px)
         while (s_speckle_off[i] >= RENDER_SCREEN_W + 32)
             s_speckle_off[i] -= RENDER_SCREEN_W + 32;
     }
+}
+
+void scenery_update_sky(float scroll_px)
+{
+    for (int i = 0; i < CLOUD_COUNT; i++) {
+        s_clouds[i].x -= scroll_px * CLOUD_PARALLAX;
+        if (s_clouds[i].x + s_clouds[i].w < -20)
+            spawn_cloud(&s_clouds[i], false);
+    }
+}
+
+int scenery_dynamic_top(void)
+{
+    int top = RENDER_SCREEN_H;
+    for (int i = 0; i < FAR_COUNT; i++) {
+        const far_t *f = &s_far[i];
+        if (f->x >= RENDER_SCREEN_W || f->x + f->spr->w <= 0)
+            continue;
+        int object_top = (int)f->y - f->spr->h;
+        if (object_top < top) top = object_top;
+    }
+    return top;
 }
 
 void scenery_draw_sky(uint16_t cloud_color, uint16_t star_dim,

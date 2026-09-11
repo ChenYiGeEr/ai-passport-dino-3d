@@ -131,13 +131,16 @@ esp_err_t bsp_display_init(void) {
     esp_lcd_panel_disp_on_off(s_panel, true);                    // 0x29 DISPON
 
     backlight_init();
-    ESP_LOGI(TAG, "显示就绪 %dx%d", BSP_LCD_W, BSP_LCD_H);
+    ESP_LOGI(TAG, "显示就绪 %dx%d, SPI目标频率=%dMHz", BSP_LCD_W, BSP_LCD_H,
+             BSP_LCD_PCLK_HZ / 1000000);
     return ESP_OK;
 }
 
 esp_lcd_panel_handle_t bsp_display_panel(void) { return s_panel; }
 
 esp_lcd_panel_io_handle_t bsp_display_io(void) { return s_io; }
+
+int bsp_display_pclk_hz(void) { return BSP_LCD_PCLK_HZ; }
 
 void bsp_display_backlight(uint8_t percent) {
     if (!s_bl_ready) return;

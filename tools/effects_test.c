@@ -73,6 +73,25 @@ static void test_depth_speeds(void)
     assert(s_ground_far[0].x > 95.49f && s_ground_far[0].x < 95.51f);
     assert(s_decor[0].x > 91.49f && s_decor[0].x < 91.51f);
     assert(s_ground_near[0].x > 87.99f && s_ground_near[0].x < 88.01f);
+
+    float cloud_x = s_clouds[0].x;
+    scenery_update(0.1f, 100.0f);
+    assert(s_clouds[0].x == cloud_x); // 云只随天空低频节拍移动
+    scenery_update_sky(10.0f);
+    assert(s_clouds[0].x > cloud_x - 2.51f && s_clouds[0].x < cloud_x - 2.49f);
+}
+
+static void test_dynamic_top(void)
+{
+    srand(3);
+    scenery_init(205, 86, 150, 174);
+    for (int i = 0; i < FAR_COUNT; i++) s_far[i].x = -200;
+    assert(scenery_dynamic_top() == RENDER_SCREEN_H);
+
+    s_far[0].x = 100;
+    s_far[0].y = 145;
+    s_far[0].spr = &spr_tree_green_far;
+    assert(scenery_dynamic_top() == 34);
 }
 
 static void test_stars(void)
@@ -119,6 +138,7 @@ int main(void)
 {
     test_tumbleweed();
     test_depth_speeds();
+    test_dynamic_top();
     test_stars();
     test_dust();
     puts("effects_test: ok");

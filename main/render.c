@@ -34,14 +34,16 @@
 // 实机上下颠倒时, 只改这一个宏即可。
 #define LANDSCAPE_LEFT 0
 
-typedef enum { CMD_SPRITE, CMD_RECT } cmd_type_t;
+typedef enum { CMD_SPRITE, CMD_RECT, CMD_DIM } cmd_type_t;
 
 typedef struct {
     cmd_type_t type;
     int x, y;
+    uint8_t opacity;
     union {
-        struct { const sprite_t *spr; } s;
+        struct { const sprite_t *spr; int w, h; } s;
         struct { int w, h; uint16_t color; } r;
+        struct { uint8_t retain; } d;
     };
 } draw_cmd_t;
 
@@ -52,6 +54,7 @@ static int s_strip_count;
 static draw_cmd_t s_cmds[MAX_CMDS];
 static int s_cmd_count;
 static uint8_t s_night_mix;                   // 精灵夜间调色强度(0..255)
+static uint8_t s_opacity;                     // 后续命令的抖动透明度
 static SemaphoreHandle_t s_free_strips;       // 可安全覆写的 DMA 条带数
 
 // 背景参数(本帧)
@@ -114,6 +117,7 @@ void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y)
     s_sky_color = sky_color;
     s_ground_color = ground_color;
     s_ground_y = ground_y;
+    s_opacity = 255;
 }
 
 void render_sprite(const sprite_t *spr, int x, int y)
@@ -123,6 +127,22 @@ void render_sprite(const sprite_t *spr, int x, int y)
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
     c->s.spr = spr;
+    c->s.w = spr->w;
+    c->s.h = spr->h;
+    c->opacity = s_opacity;
+}
+
+void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
+                          uint8_t opacity)
+{
+    if (s_cmd_count >= MAX_CMDS || w <= 0 || h <= 0 || opacity == 0) return;
+    draw_cmd_t *c = &s_cmds[s_cmd_count++];
+    c->type = CMD_SPRITE;
+    c->x = x; c->y = y;
+    c->s.spr = spr;
+    c->s.w = w;
+    c->s.h = h;
+    c->opacity = opacity;
 }
 
 void render_fill_rect(int x, int y, int w, int h, uint16_t color)
@@ -132,6 +152,22 @@ void render_fill_rect(int x, int y, int w, int h, uint16_t color)
     c->type = CMD_RECT;
     c->x = x; c->y = y;
     c->r.w = w; c->r.h = h; c->r.color = color;
+    c->opacity = s_opacity;
+}
+
+void render_set_opacity(uint8_t opacity)
+{
+    s_opacity = opacity;
+}
+
+void render_dim(uint8_t retain)
+{
+    if (s_cmd_count >= MAX_CMDS || retain == 255) return;
+    draw_cmd_t *c = &s_cmds[s_cmd_count++];
+    c->type = CMD_DIM;
+    c->x = 0; c->y = 0;
+    c->d.retain = retain;
+    c->opacity = 255;
 }
 
 static inline uint16_t swap16(uint16_t v)
@@ -143,9 +179,53 @@ static inline uint16_t swap16(uint16_t v)
 #endif
 }
 
+static inline bool dither_visible(int x, int y, uint8_t opacity)
+{
+    static const uint8_t BAYER_4X4[16] = {
+         0,  8,  2, 10,
+        12,  4, 14,  6,
+         3, 11,  1,  9,
+        15,  7, 13,  5,
+    };
+    if (opacity == 255) return true;
+    return opacity > (uint8_t)(BAYER_4X4[((y & 3) << 2) | (x & 3)] * 16 + 7);
+}
+
+static inline uint16_t tint_sprite_pixel(uint16_t v)
+{
+    if (!s_night_mix) return v;
+    // 压暗偏蓝: r×0.22 g×0.25 b×0.45
+    int r = (v >> 11) & 31;
+    int g = (v >> 5) & 63;
+    int b = v & 31;
+    int nr = r * 7 / 32;
+    int ng = g * 8 / 64;
+    int nb = b * 14 / 31 + 1;
+    if (nb > 31) nb = 31;
+    r += (nr - r) * s_night_mix / 255;
+    g += (ng - g) * s_night_mix / 255;
+    b += (nb - b) * s_night_mix / 255;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 // 把一条命令画进当前条带。strip_y 为条带在屏幕上的起始 y。
 static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
 {
+    if (c->type == CMD_DIM) {
+        int y1 = strip_y + STRIP_H < RENDER_SCREEN_H
+            ? strip_y + STRIP_H : RENDER_SCREEN_H;
+        for (int y = strip_y; y < y1; y++) {
+            uint16_t *dst = strip + (y - strip_y) * RENDER_SCREEN_W;
+            for (int x = 0; x < RENDER_SCREEN_W; x++) {
+                uint16_t v = swap16(dst[x]);
+                int r = ((v >> 11) & 31) * c->d.retain / 255;
+                int g = ((v >> 5) & 63) * c->d.retain / 255;
+                int b = (v & 31) * c->d.retain / 255;
+                dst[x] = swap16((uint16_t)((r << 11) | (g << 5) | b));
+            }
+        }
+        return;
+    }
     if (c->type == CMD_RECT) {
         int y0 = c->y > strip_y ? c->y : strip_y;
         int y1 = c->y + c->r.h < strip_y + STRIP_H ? c->y + c->r.h : strip_y + STRIP_H;
@@ -154,44 +234,49 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
         uint16_t v = swap16(c->r.color);
         for (int y = y0; y < y1; y++)
             for (int x = x0; x < x1; x++)
-                strip[(y - strip_y) * RENDER_SCREEN_W + x] = v;
+                if (dither_visible(x, y, c->opacity))
+                    strip[(y - strip_y) * RENDER_SCREEN_W + x] = v;
         return;
     }
     // 精灵: 16bpp RGB565, 0x0000 透明; 按昼夜进度逐像素调向夜色
     const sprite_t *sp = c->s.spr;
     int x0 = c->x > 0 ? c->x : 0;
-    int x1 = c->x + sp->w < RENDER_SCREEN_W ? c->x + sp->w : RENDER_SCREEN_W;
+    int x1 = c->x + c->s.w < RENDER_SCREEN_W ? c->x + c->s.w : RENDER_SCREEN_W;
     int y0 = c->y > strip_y ? c->y : strip_y;
-    int y1 = c->y + sp->h < strip_y + STRIP_H ? c->y + sp->h : strip_y + STRIP_H;
+    int y1 = c->y + c->s.h < strip_y + STRIP_H ? c->y + c->s.h : strip_y + STRIP_H;
+    if (c->s.w == sp->w && c->s.h == sp->h && c->opacity == 255) {
+        // 游戏绝大多数精灵保持原尺寸，避开逐像素除法和抖动判断。
+        for (int y = y0; y < y1; y++) {
+            const uint16_t *row = sp->px + (y - c->y) * sp->w;
+            uint16_t *dst = strip + (y - strip_y) * RENDER_SCREEN_W;
+            for (int x = x0; x < x1; x++) {
+                uint16_t v = row[x - c->x];
+                if (v) dst[x] = swap16(tint_sprite_pixel(v));
+            }
+        }
+        return;
+    }
     for (int y = y0; y < y1; y++) {
-        const uint16_t *row = sp->px + (y - c->y) * sp->w;
+        int src_y = (y - c->y) * sp->h / c->s.h;
+        const uint16_t *row = sp->px + src_y * sp->w;
         uint16_t *dst = strip + (y - strip_y) * RENDER_SCREEN_W;
         for (int x = x0; x < x1; x++) {
-            uint16_t v = row[x - c->x];
+            if (!dither_visible(x, y, c->opacity)) continue;
+            int src_x = (x - c->x) * sp->w / c->s.w;
+            uint16_t v = row[src_x];
             if (!v) continue;
-            if (s_night_mix) {
-                // 压暗偏蓝: r×0.22 g×0.25 b×0.45
-                int r = (v >> 11) & 31;
-                int g = (v >> 5) & 63;
-                int b = v & 31;
-                int nr = r * 7 / 32;
-                int ng = g * 8 / 64;
-                int nb = b * 14 / 31 + 1;
-                if (nb > 31) nb = 31;
-                r += (nr - r) * s_night_mix / 255;
-                g += (ng - g) * s_night_mix / 255;
-                b += (nb - b) * s_night_mix / 255;
-                v = (uint16_t)((r << 11) | (g << 5) | b);
-            }
-            dst[x] = swap16(v);
+            dst[x] = swap16(tint_sprite_pixel(v));
         }
     }
 }
 
-void render_flush(void)
+void render_flush_from(int start_y)
 {
+    if (start_y < 0) start_y = 0;
+    if (start_y >= RENDER_SCREEN_H) return;
+
     int submitted = 0;
-    for (int sy = 0; sy < RENDER_SCREEN_H; sy += STRIP_H) {
+    for (int sy = start_y; sy < RENDER_SCREEN_H; sy += STRIP_H) {
         int rows = RENDER_SCREEN_H - sy < STRIP_H ? RENDER_SCREEN_H - sy : STRIP_H;
         xSemaphoreTake(s_free_strips, portMAX_DELAY);
         uint16_t *strip = s_strips[submitted % s_strip_count];
@@ -219,6 +304,11 @@ void render_flush(void)
         xSemaphoreGive(s_free_strips);
 }
 
+void render_flush(void)
+{
+    render_flush_from(0);
+}
+
 // ---- 串口截屏导出 ----
 static volatile bool s_dump_pending;
 
@@ -232,7 +322,7 @@ void render_dump_frame(render_dump_writer_t writer)
     for (int sy = 0; sy < RENDER_SCREEN_H; sy += STRIP_H) {
         int rows = RENDER_SCREEN_H - sy < STRIP_H ? RENDER_SCREEN_H - sy : STRIP_H;
         for (int y = 0; y < rows; y++) {
-            uint16_t v = (sy + y) < s_ground_y ? s_sky_color : s_ground_color;
+            uint16_t v = swap16((sy + y) < s_ground_y ? s_sky_color : s_ground_color);
             for (int x = 0; x < RENDER_SCREEN_W; x++)
                 strip[y * RENDER_SCREEN_W + x] = v;
         }

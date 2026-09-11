@@ -22,11 +22,25 @@ void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y);
 // 在指定横屏坐标绘制精灵(自动裁剪)。x,y 为精灵左上角。
 void render_sprite(const sprite_t *spr, int x, int y);
 
+// 以最近邻方式绘制到指定尺寸；opacity 用 4x4 有序抖动模拟 0..255 透明度。
+void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
+                          uint8_t opacity);
+
 // 在指定坐标填充纯色矩形(自动裁剪)。
 void render_fill_rect(int x, int y, int w, int h, uint16_t color);
 
+// 设置后续精灵/矩形命令的有序抖动透明度；render_begin() 会恢复为 255。
+void render_set_opacity(uint8_t opacity);
+
+// 将此前合成的整屏内容按 RGB565 通道压暗；retain=128 约保留 50% 亮度。
+void render_dim(uint8_t retain);
+
 // 一帧结束:把所有条带推送到屏幕(阻塞至 DMA 发送完成)。
 void render_flush(void);
+
+// 仅把 start_y..屏幕底部推送到 LCD；命令列表仍保留完整帧，供截屏重放。
+// start_y 可为任意像素行，函数会自动裁剪到屏幕范围。
+void render_flush_from(int start_y);
 
 // ---- 串口截屏导出(FAP_SCREENSHOT_V1) ----
 // 标记下一帧需要导出。由串口任务调用。
