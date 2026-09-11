@@ -11,7 +11,7 @@
 #define GRAVITY         800.0f   // px/s^2
 #define GRAVITY_BOOST   0.65f    // 按住 UP 上升期重力系数(跳得更高)
 #define FAST_FALL_MULT    2.6f   // 空中按住 DOWN 速降
-#define PLAYER_MIN_FOOT_Y 60.0f  // 横屏 240px 高度下，脚部最高到屏幕约 3/4 处
+#define PLAYER_MIN_FOOT_Y 144.0f // 在地面 y=216 下保持约 72px 最大上升距离
 #define ANIM_BASE_S     0.090f   // 奔跑帧间隔(档 0)
 #define ANIM_SPEEDUP    0.018f   // 每档减少的帧间隔
 

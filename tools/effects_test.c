@@ -21,6 +21,11 @@ void render_sprite(const sprite_t *spr, int x, int y)
     if (spr == &spr_tumbleweed_1) s_tumbleweed_y = y;
     s_sprite_count++;
 }
+void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h, uint8_t opacity)
+{
+    (void)spr; (void)x; (void)y; (void)w; (void)h; (void)opacity;
+    s_sprite_count++;
+}
 void render_sprite_raw(const sprite_t *spr, int x, int y)
 {
     (void)spr; (void)x; (void)y;
@@ -40,40 +45,33 @@ void render_fill_rect(int x, int y, int w, int h, uint16_t color)
 static void test_tumbleweed(void)
 {
     srand(1);
-    scenery_init(205, 86, 150, 174);
-    for (int i = 0; i < DECOR_COUNT; i++) {
-        s_decor[i].x = 100 + i * 40;
-        s_decor[i].tumbleweed = false;
-        s_decor[i].spr = &spr_rock_0;
-        s_decor[i].anchor_y = 207;
-    }
-    decor_t *weed = &s_decor[0];
-    weed->tumbleweed = true;
+    scenery_init(216, 88, 160, 160);
+    tumbleweed_t *weed = &s_tumble_mid[0];
+    weed->x = 100;
     weed->spr = &spr_tumbleweed_0;
     weed->roll_distance = 0;
 
     scenery_update(0.2f, 100.0f);
-    assert(weed->x > 76.9f && weed->x < 77.1f); // 100 - 100*0.2*1.15
+    assert(weed->x > 82.7f && weed->x < 82.9f); // 100 - 100*0.2*0.75*1.15
     assert(weed->spr == &spr_tumbleweed_1);
 
     s_sprite_count = 0;
     scenery_draw_ground_back(0);
-    assert(s_sprite_count == DECOR_COUNT);
-    assert(s_tumbleweed_y == 187); // anchor 207 - 38/2 - frame 1 bounce 1
+    assert(s_sprite_count == DECOR_COUNT + TUMBLE_MID_COUNT);
 
     s_sprite_count = 0;
     scenery_draw_ground_front();
-    assert(s_sprite_count == GROUND_NEAR_COUNT);
-    assert(s_last_sprite_y >= 224); // K=3 近景严格限制在屏幕底部
+    assert(s_sprite_count == GROUND_NEAR_COUNT + TUMBLE_NEAR_COUNT);
+    assert(s_tumbleweed_y == 185); // y=216，帧1 下移 3px
+    assert(s_last_sprite_y >= 170); // 风滚草底部贴近地面线 y=216
 }
 
 static void test_depth_speeds(void)
 {
     srand(2);
-    scenery_init(205, 86, 150, 174);
+    scenery_init(216, 88, 160, 160);
     s_ground_far[0].x = 100.0f;
     s_decor[0].x = 100.0f;
-    s_decor[0].tumbleweed = false;
     s_ground_near[0].x = 100.0f;
 
     scenery_update(0.1f, 100.0f);
@@ -91,14 +89,14 @@ static void test_depth_speeds(void)
 static void test_dynamic_top(void)
 {
     srand(3);
-    scenery_init(205, 86, 150, 174);
+    scenery_init(216, 88, 160, 160);
     for (int i = 0; i < FAR_COUNT; i++) s_far[i].x = -200;
     assert(scenery_dynamic_top() == RENDER_SCREEN_H);
 
     s_far[0].x = 100;
     s_far[0].y = 145;
-    s_far[0].spr = &spr_cactus_far_tall_0;
-    assert(scenery_dynamic_top() == 63);
+    s_far[0].spr = &spr_dry_grass_far;
+    assert(scenery_dynamic_top() == 131);
 }
 
 static void test_stars(void)
@@ -130,7 +128,7 @@ static void test_stars(void)
 static void test_dust(void)
 {
     dust_reset();
-    dust_emit_start(40, 205);
+    dust_emit_start(40, 216);
     s_rect_count = 0;
     dust_draw(1, 2);
     assert(s_rect_count == 7);
@@ -139,7 +137,7 @@ static void test_dust(void)
     dust_draw(1, 2);
     assert(s_rect_count == 0);
 
-    dust_emit_land(40, 205);
+    dust_emit_land(40, 216);
     s_rect_count = 0;
     dust_draw(1, 2);
     assert(s_rect_count == 5);

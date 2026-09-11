@@ -192,6 +192,15 @@ for (let i = 0; i < 6; i++) MODELS.push({ name: `ptero_${i}`, file: `ptero/${i}.
 for (let i = 0; i <= 4; i++) MODELS.push({ name: `rock_${i}`, file: `rocks/${i}.vox` });
 for (let i = 0; i <= 2; i++) MODELS.push({ name: `flower_${i}`, file: `flowers/${i}.vox` });
 MODELS.push({ name: 'scorpion', file: 'misc/scorpion.vox' });
+// 沙漠中景仙人掌：默认尺寸约 35–45px；高档严格压到 75px 以内。
+for (const [n, f] of [['cactus_mid_low_0', 'cactus/cactus.vox'],
+                      ['cactus_mid_low_1', 'cactus/cactus_tall.vox'],
+                      ['cactus_mid_low_2', 'cactus/cactus_thin.vox']])
+    MODELS.push({ name: n, file: f });
+for (const [n, f] of [['cactus_mid_high_0', 'cactus/cactus.vox'],
+                      ['cactus_mid_high_1', 'cactus/cactus_tall.vox'],
+                      ['cactus_mid_high_2', 'cactus/cactus_thin.vox']])
+    MODELS.push({ name: n, file: f, k: 3, scale: [18, 20] });
 // 跑道纵深层：远层 K=1，近层只选少量石块/花草 K=3，控制 flash 和合成成本。
 for (const [n, f] of [['rock_far_0', 'rocks/0.vox'], ['rock_far_2', 'rocks/2.vox'],
                       ['flower_far_0', 'flowers/0.vox'], ['flower_far_2', 'flowers/2.vox']])
@@ -218,6 +227,7 @@ const models = MODELS.map(m => {
     if (m.name.startsWith('dino_')) model = recolorDino(model);
     let sp = renderSprite(model, m.k);
     if (m.k === undefined) sp = scaleSpriteNearest(sp, 3, 4);
+    if (m.scale) sp = scaleSpriteNearest(sp, m.scale[0], m.scale[1]);
     console.log(`${m.name}: ${sp.w}x${sp.h} (${m.file})`);
     return { name: m.name, w: sp.w, h: sp.h, px: sp.px };
 });
@@ -326,10 +336,10 @@ const SUN_FRAMES = [
 ];
 for (let i = 0; i < SUN_FRAMES.length; i++) addAsciiSprite(`sun_${i}`, SUN_FRAMES[i], 2, SUN_COLORS);
 const MOON_FRAMES = [
-    ['...WW...','..WWWW..','.WWWWW..','WWWWWW..','WWWWWW..','.WWWWW..','..WWWW..','...WW...'],
-    ['..WWW...','.WWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','.WWWWW..','..WWW...'],
-    ['..WWWW..','.WWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','.WWWWWW.','..WWWW..'],
-    ['..WWW...','.WWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','WWWWWW..','.WWWWW..','..WWW...'],
+    ['...WW...','..WWWW..','.WWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','.WWWWWW.','..WWWW..'],
+    ['...WW...','..WWWW..','.WWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','.WWWWWW.','..WWWW..'],
+    ['...WW...','..WWWW..','.WWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','.WWWWWW.','..WWWW..'],
+    ['...WW...','..WWWW..','.WWWWWW.','WWWWWWW.','WWWWWWW.','WWWWWWW.','.WWWWWW.','..WWWW..'],
 ];
 for (let i = 0; i < MOON_FRAMES.length; i++) addAsciiSprite(`moon_${i}`, MOON_FRAMES[i], 2, MOON_COLORS);
 

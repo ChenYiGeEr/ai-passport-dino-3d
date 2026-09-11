@@ -61,3 +61,12 @@ void render_dump_frame(render_dump_writer_t writer);
 
 // RGB565 颜色工具
 #define RGB565(r, g, b) (uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
+
+typedef enum {
+    RENDER_DEPTH_NEAR = 0,
+    RENDER_DEPTH_MID,
+    RENDER_DEPTH_SKY,
+} render_depth_t;
+
+// 设置后续精灵的纵深调色；命令会捕获当前层次，供条带重放时保持一致。
+void render_set_depth(render_depth_t depth);

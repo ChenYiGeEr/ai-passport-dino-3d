@@ -40,6 +40,7 @@ typedef struct {
     cmd_type_t type;
     int x, y;
     uint8_t opacity;
+    uint8_t depth;
     bool tint;
     union {
         struct { const sprite_t *spr; int w, h; } s;
@@ -59,6 +60,7 @@ static scene_id_t s_scene_current = SCENE_DESERT;
 static scene_id_t s_scene_next = SCENE_DESERT;
 static uint8_t s_scene_mix;
 static uint8_t s_opacity;                     // 后续命令的抖动透明度
+static uint8_t s_depth = RENDER_DEPTH_NEAR;  // 后续精灵的纵深层次
 static SemaphoreHandle_t s_free_strips;       // 可安全覆写的 DMA 条带数
 
 // 背景参数(本帧)
@@ -129,6 +131,7 @@ void render_begin(uint16_t sky_color, uint16_t ground_color, int ground_y)
     s_ground_color = ground_color;
     s_ground_y = ground_y;
     s_opacity = 255;
+    s_depth = RENDER_DEPTH_NEAR;
 }
 
 void render_sprite(const sprite_t *spr, int x, int y)
@@ -137,6 +140,7 @@ void render_sprite(const sprite_t *spr, int x, int y)
     draw_cmd_t *c = &s_cmds[s_cmd_count++];
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
+    c->depth = s_depth;
     c->tint = true;
     c->s.spr = spr;
     c->s.w = spr->w;
@@ -150,6 +154,7 @@ void render_sprite_raw(const sprite_t *spr, int x, int y)
     draw_cmd_t *c = &s_cmds[s_cmd_count++];
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
+    c->depth = s_depth;
     c->tint = false;
     c->s.spr = spr;
     c->s.w = spr->w;
@@ -164,6 +169,7 @@ void render_sprite_scaled(const sprite_t *spr, int x, int y, int w, int h,
     draw_cmd_t *c = &s_cmds[s_cmd_count++];
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
+    c->depth = s_depth;
     c->tint = true;
     c->s.spr = spr;
     c->s.w = w;
@@ -178,6 +184,7 @@ void render_sprite_scaled_raw(const sprite_t *spr, int x, int y, int w, int h,
     draw_cmd_t *c = &s_cmds[s_cmd_count++];
     c->type = CMD_SPRITE;
     c->x = x; c->y = y;
+    c->depth = s_depth;
     c->tint = false;
     c->s.spr = spr;
     c->s.w = w;
@@ -198,6 +205,11 @@ void render_fill_rect(int x, int y, int w, int h, uint16_t color)
 void render_set_opacity(uint8_t opacity)
 {
     s_opacity = opacity;
+}
+
+void render_set_depth(render_depth_t depth)
+{
+    s_depth = (uint8_t)depth;
 }
 
 void render_dim(uint8_t retain)
@@ -231,9 +243,10 @@ static inline bool dither_visible(int x, int y, uint8_t opacity)
     return opacity > (uint8_t)(BAYER_4X4[((y & 3) << 2) | (x & 3)] * 16 + 7);
 }
 
-static inline uint16_t tint_sprite_pixel(uint16_t v)
+static inline uint16_t tint_sprite_pixel(uint16_t v, uint8_t depth)
 {
-    if (!s_night_mix && !s_scene_mix && s_scene_current == SCENE_DESERT) return v;
+    if (!s_night_mix && !s_scene_mix && s_scene_current == SCENE_DESERT &&
+        depth == RENDER_DEPTH_NEAR) return v;
     // 压暗偏蓝: r×0.22 g×0.25 b×0.45
     int r = (v >> 11) & 31;
     int g = (v >> 5) & 63;
@@ -252,6 +265,21 @@ static inline uint16_t tint_sprite_pixel(uint16_t v)
     cg = (uint8_t)(cg + ((int)ng2 - cg) * s_scene_mix / 255);
     cb = (uint8_t)(cb + ((int)nb2 - cb) * s_scene_mix / 255);
     r = r * cr / 255; g = g * cg / 255; b = b * cb / 255;
+
+    // 白天天空层向背景退饱和，夜晚近景保持可见而天空层进一步沉入背景。
+    int day_mix = depth == RENDER_DEPTH_NEAR ? 255 :
+                  depth == RENDER_DEPTH_MID ? 225 : 170;
+    int night_mix = depth == RENDER_DEPTH_NEAR ? 245 :
+                    depth == RENDER_DEPTH_MID ? 175 : 90;
+    int depth_mix = day_mix + (night_mix - day_mix) * s_night_mix / 255;
+    if (depth_mix < 255) {
+        int sr = (s_sky_color >> 11) & 31;
+        int sg = (s_sky_color >> 5) & 63;
+        int sb = s_sky_color & 31;
+        r = (r * depth_mix + sr * (255 - depth_mix)) / 255;
+        g = (g * depth_mix + sg * (255 - depth_mix)) / 255;
+        b = (b * depth_mix + sb * (255 - depth_mix)) / 255;
+    }
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
@@ -298,7 +326,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
             uint16_t *dst = strip + (y - strip_y) * RENDER_SCREEN_W;
             for (int x = x0; x < x1; x++) {
                 uint16_t v = row[x - c->x];
-                if (v) dst[x] = swap16(c->tint ? tint_sprite_pixel(v) : v);
+                if (v) dst[x] = swap16(c->tint ? tint_sprite_pixel(v, c->depth) : v);
             }
         }
         return;
@@ -312,7 +340,7 @@ static void draw_cmd_in_strip(const draw_cmd_t *c, int strip_y, uint16_t *strip)
             int src_x = (x - c->x) * sp->w / c->s.w;
             uint16_t v = row[src_x];
             if (!v) continue;
-            dst[x] = swap16(c->tint ? tint_sprite_pixel(v) : v);
+            dst[x] = swap16(c->tint ? tint_sprite_pixel(v, c->depth) : v);
         }
     }
 }

@@ -11,29 +11,36 @@
 #define FAR_COUNT    4
 #define GROUND_FAR_COUNT  3
 #define GROUND_NEAR_COUNT 2
+#define TUMBLE_NEAR_COUNT 1
+#define TUMBLE_MID_COUNT 2
 #define STAR_COUNT  14
 // 云的视差系数: 比地面慢, 营造远近层次
 #define CLOUD_PARALLAX 0.25f
 // 三层滚动视差系数
-#define FAR_PARALLAX   0.35f
-#define SCENE_FAR_SPEED 0.35f
 #define SCENE_MID_SPEED 0.75f
 #define GROUND_NEAR_SPEED 1.10f
 
 typedef struct { float x, y; int w; } cloud_t;
 typedef struct {
     float x;
-    float roll_distance;
     const sprite_t *spr;
-    bool tumbleweed;
     int anchor_y;
 } decor_t;
+typedef struct {
+    float x;
+    float roll_distance;
+    const sprite_t *spr;
+    int anchor_y;
+    bool small;
+} tumbleweed_t;
 typedef struct { float x, y; const sprite_t *spr; } far_t;
 typedef struct { float x; int anchor_y; const sprite_t *spr; } depth_decor_t;
 typedef struct { uint16_t x; uint8_t y, reveal, period, phase; } star_t;
 
 static cloud_t s_clouds[CLOUD_COUNT];
 static decor_t s_decor[DECOR_COUNT];
+static tumbleweed_t s_tumble_near[TUMBLE_NEAR_COUNT];
+static tumbleweed_t s_tumble_mid[TUMBLE_MID_COUNT];
 static far_t s_far[FAR_COUNT];
 static depth_decor_t s_ground_far[GROUND_FAR_COUNT];
 static depth_decor_t s_ground_near[GROUND_NEAR_COUNT];
@@ -41,7 +48,6 @@ static int s_ground_y;
 static int s_far_top, s_far_bottom; // 远河岸纵向范围
 static int s_field_y;
 static float s_speckle_off[3];
-static float s_scene_far_scroll;
 static float s_scene_mid_scroll;
 static scene_id_t s_scene = SCENE_DESERT;
 
@@ -67,15 +73,17 @@ static const sprite_t *DECOR_SPRITES[] = {
     &spr_rock_0, &spr_rock_1, &spr_rock_2, &spr_rock_3, &spr_rock_4,
     &spr_flower_0, &spr_flower_1, &spr_flower_2,
     &spr_scorpion, &spr_dry_grass,
+    &spr_cactus_mid_low_0, &spr_cactus_mid_low_1, &spr_cactus_mid_low_2,
+    &spr_cactus_mid_high_0, &spr_cactus_mid_high_1, &spr_cactus_mid_high_2,
 };
 #define DECOR_NORMAL_COUNT ((int)(sizeof(DECOR_SPRITES) / sizeof(DECOR_SPRITES[0])))
-#define DECOR_SPRITE_COUNT (DECOR_NORMAL_COUNT + 1) // 普通精灵 + 1 个风滚草选项
+#define DECOR_SPRITE_COUNT DECOR_NORMAL_COUNT
 
 static const sprite_t *FAR_SPRITES[] = {
-    &spr_cactus_far_tall_0, &spr_cactus_far_tall_1, &spr_cactus_far_tall_2,
+    &spr_dry_grass_far, &spr_agave_far,
 };
 #define FAR_BASE_COUNT ((int)(sizeof(FAR_SPRITES) / sizeof(FAR_SPRITES[0])))
-#define FAR_SPRITE_COUNT (FAR_BASE_COUNT + 1) // 最后一个槽位由两种新植物共享
+#define FAR_SPRITE_COUNT FAR_BASE_COUNT
 
 static const sprite_t *GROUND_FAR_SPRITES[] = {
     &spr_rock_far_0, &spr_rock_far_2,
@@ -93,19 +101,38 @@ static void spawn_cloud(cloud_t *c, bool initial)
 {
     c->x = initial ? (float)(rand() % RENDER_SCREEN_W)
                    : (float)(RENDER_SCREEN_W + 20);
-    c->y = (float)(10 + rand() % 60);
+    c->y = (float)(16 + rand() % 49); // 云顶限制在 y=16..64
     c->w = 18 + rand() % 22;
 }
 
 static void spawn_decor(decor_t *d, bool initial)
 {
     int choice = rand() % DECOR_SPRITE_COUNT;
-    d->tumbleweed = choice == DECOR_SPRITE_COUNT - 1;
-    d->roll_distance = 0;
-    d->spr = d->tumbleweed ? TUMBLEWEED_FRAMES[0] : DECOR_SPRITES[choice];
-    d->anchor_y = s_ground_y + 2 + rand() % 5;
+    d->spr = DECOR_SPRITES[choice];
+    d->anchor_y = s_field_y;
     d->x = initial ? (float)(rand() % RENDER_SCREEN_W)
                    : (float)(RENDER_SCREEN_W + 20 + rand() % 120);
+}
+
+static void spawn_tumbleweed(tumbleweed_t *t, bool near, bool initial)
+{
+    t->small = !near;
+    t->roll_distance = 0;
+    t->spr = TUMBLEWEED_FRAMES[0];
+    t->anchor_y = near ? s_ground_y : s_field_y;
+    t->x = initial ? (float)(rand() % RENDER_SCREEN_W)
+                   : (float)(RENDER_SCREEN_W + (near ? 120 : 24)
+                             + rand() % (near ? 220 : 180));
+}
+
+static void keep_tumbleweed_spacing(tumbleweed_t *group, int count)
+{
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (fabsf(group[i].x - group[j].x) < 58.0f)
+                group[j].x = group[i].x + 72.0f;
+        }
+    }
 }
 
 static void spawn_depth_decor(depth_decor_t *d, bool near, bool initial)
@@ -126,9 +153,7 @@ static void spawn_depth_decor(depth_decor_t *d, bool near, bool initial)
 static void spawn_far(far_t *f, bool initial)
 {
     int choice = rand() % FAR_SPRITE_COUNT;
-    const sprite_t *sp = choice < FAR_BASE_COUNT
-        ? FAR_SPRITES[choice]
-        : (rand() & 1) ? &spr_dry_grass_far : &spr_agave_far;
+    const sprite_t *sp = FAR_SPRITES[choice];
     f->spr = sp;
     f->x = initial ? (float)(rand() % RENDER_SCREEN_W)
                    : (float)(RENDER_SCREEN_W + 30 + rand() % 150);
@@ -136,16 +161,19 @@ static void spawn_far(far_t *f, bool initial)
     f->y = (float)(s_far_bottom - 2 - (rand() % 6));
 }
 
-void scenery_init(int ground_y, int far_top, int far_bottom, int field_y)
+void scenery_init(int ground_y, int mid_top, int mid_bottom, int field_y)
 {
     s_ground_y = ground_y;
-    s_far_top = far_top; (void)s_far_top; // 预留: 远景 y 目前只贴着 far_bottom
-    s_far_bottom = far_bottom;
+    s_far_top = mid_top; (void)s_far_top; // 预留: 中景 y 目前只贴着 mid_bottom
+    s_far_bottom = mid_bottom;
     s_field_y = field_y;
-    s_scene_far_scroll = 0;
     s_scene_mid_scroll = 0;
     for (int i = 0; i < CLOUD_COUNT; i++) spawn_cloud(&s_clouds[i], true);
     for (int i = 0; i < DECOR_COUNT; i++) spawn_decor(&s_decor[i], true);
+    for (int i = 0; i < TUMBLE_NEAR_COUNT; i++) spawn_tumbleweed(&s_tumble_near[i], true, true);
+    for (int i = 0; i < TUMBLE_MID_COUNT; i++) spawn_tumbleweed(&s_tumble_mid[i], false, true);
+    keep_tumbleweed_spacing(s_tumble_near, TUMBLE_NEAR_COUNT);
+    keep_tumbleweed_spacing(s_tumble_mid, TUMBLE_MID_COUNT);
     for (int i = 0; i < FAR_COUNT; i++) spawn_far(&s_far[i], true);
     for (int i = 0; i < GROUND_FAR_COUNT; i++) spawn_depth_decor(&s_ground_far[i], false, true);
     for (int i = 0; i < GROUND_NEAR_COUNT; i++) spawn_depth_decor(&s_ground_near[i], true, true);
@@ -155,30 +183,41 @@ void scenery_reset(void)
 {
     for (int i = 0; i < CLOUD_COUNT; i++) spawn_cloud(&s_clouds[i], true);
     for (int i = 0; i < DECOR_COUNT; i++) spawn_decor(&s_decor[i], true);
+    for (int i = 0; i < TUMBLE_NEAR_COUNT; i++) spawn_tumbleweed(&s_tumble_near[i], true, true);
+    for (int i = 0; i < TUMBLE_MID_COUNT; i++) spawn_tumbleweed(&s_tumble_mid[i], false, true);
+    keep_tumbleweed_spacing(s_tumble_near, TUMBLE_NEAR_COUNT);
+    keep_tumbleweed_spacing(s_tumble_mid, TUMBLE_MID_COUNT);
     for (int i = 0; i < FAR_COUNT; i++) spawn_far(&s_far[i], true);
     for (int i = 0; i < GROUND_FAR_COUNT; i++) spawn_depth_decor(&s_ground_far[i], false, true);
     for (int i = 0; i < GROUND_NEAR_COUNT; i++) spawn_depth_decor(&s_ground_near[i], true, true);
     for (int i = 0; i < 3; i++) s_speckle_off[i] = 0;
-    s_scene_far_scroll = 0;
     s_scene_mid_scroll = 0;
 }
 
 void scenery_update(float dt, float speed_px)
 {
     for (int i = 0; i < DECOR_COUNT; i++) {
-        float travel = speed_px * dt * (s_decor[i].tumbleweed
-                                        ? TUMBLEWEED_SPEED : SCENE_MID_SPEED);
-        s_decor[i].x -= travel;
-        if (s_decor[i].tumbleweed) {
-            s_decor[i].roll_distance += travel;
-            int frame = (int)(s_decor[i].roll_distance / TUMBLEWEED_FRAME_PX)
-                        % TUMBLEWEED_FRAME_COUNT;
-            s_decor[i].spr = TUMBLEWEED_FRAMES[frame];
-        }
+        s_decor[i].x -= speed_px * SCENE_MID_SPEED * dt;
         if (s_decor[i].x + s_decor[i].spr->w < -20) spawn_decor(&s_decor[i], false);
     }
+    tumbleweed_t *groups[2] = { s_tumble_near, s_tumble_mid };
+    const int counts[2] = { TUMBLE_NEAR_COUNT, TUMBLE_MID_COUNT };
+    for (int g = 0; g < 2; g++) {
+        for (int i = 0; i < counts[g]; i++) {
+            tumbleweed_t *t = &groups[g][i];
+            float factor = t->small ? SCENE_MID_SPEED : GROUND_NEAR_SPEED;
+            float travel = speed_px * dt * factor * TUMBLEWEED_SPEED;
+            t->x -= travel;
+            t->roll_distance += travel;
+            int frame = (int)(t->roll_distance / TUMBLEWEED_FRAME_PX) % TUMBLEWEED_FRAME_COUNT;
+            t->spr = TUMBLEWEED_FRAMES[frame];
+            if (t->x + t->spr->w < -20) spawn_tumbleweed(t, !t->small, false);
+        }
+    }
+    keep_tumbleweed_spacing(s_tumble_near, TUMBLE_NEAR_COUNT);
+    keep_tumbleweed_spacing(s_tumble_mid, TUMBLE_MID_COUNT);
     for (int i = 0; i < FAR_COUNT; i++) {
-        s_far[i].x -= speed_px * FAR_PARALLAX * dt;
+        s_far[i].x -= speed_px * SCENE_MID_SPEED * dt;
         if (s_far[i].x + s_far[i].spr->w < -20) spawn_far(&s_far[i], false);
     }
     for (int i = 0; i < GROUND_NEAR_COUNT; i++) {
@@ -186,13 +225,10 @@ void scenery_update(float dt, float speed_px)
         d->x -= speed_px * GROUND_NEAR_SPEED * dt;
         if (d->x + d->spr->w < -20) spawn_depth_decor(d, true, false);
     }
-    s_scene_far_scroll += speed_px * dt * SCENE_FAR_SPEED;
     s_scene_mid_scroll += speed_px * dt * SCENE_MID_SPEED;
-    while (s_scene_far_scroll >= RENDER_SCREEN_W + 40) s_scene_far_scroll -= RENDER_SCREEN_W + 40;
     while (s_scene_mid_scroll >= RENDER_SCREEN_W + 40) s_scene_mid_scroll -= RENDER_SCREEN_W + 40;
 }
 
-float scenery_scene_far_scroll(void) { return s_scene_far_scroll; }
 float scenery_scene_mid_scroll(void) { return s_scene_mid_scroll; }
 
 void scenery_update_sky(float scroll_px)
@@ -228,7 +264,7 @@ void scenery_draw_sky(uint16_t cloud_color, uint16_t star_dim,
     float arc = sinf(celestial_progress * 3.1415926f);
     int x = is_night ? 16 + (int)(272.0f * celestial_progress + 0.5f)
                      : 288 - (int)(272.0f * celestial_progress + 0.5f);
-    int y = 28 + (int)(26.0f * (1.0f - arc) + 0.5f);
+    int y = 36 + (int)(8.0f * (1.0f - arc) + 0.5f);
     render_sprite_raw(is_night ?
                       (frame == 0 ? &spr_moon_0 : frame == 1 ? &spr_moon_1 :
                        frame == 2 ? &spr_moon_2 : &spr_moon_3) :
@@ -260,10 +296,10 @@ void scenery_draw_sky(uint16_t cloud_color, uint16_t star_dim,
     }
 }
 
-void scenery_draw_far(void)
+void scenery_draw_mid_back(void)
 {
     if (s_scene != SCENE_DESERT) return;
-    // 远景树/小仙人掌: 底部对齐远河岸上的 y
+    // 远景仅保留低细节草/龙舌兰；非碰撞仙人掌统一在中景绘制。
     for (int i = 0; i < FAR_COUNT; i++) {
         far_t *f = &s_far[i];
         render_sprite(f->spr, (int)f->x, (int)f->y - f->spr->h);
@@ -276,14 +312,17 @@ void scenery_draw_ground_back(uint16_t speckle_color)
     if (s_scene != SCENE_DESERT) return;
     for (int i = 0; i < DECOR_COUNT; i++) {
         decor_t *d = &s_decor[i];
-        int bounce = 0;
-        if (d->tumbleweed) {
-            int frame = (int)(d->roll_distance / TUMBLEWEED_FRAME_PX)
-                        % TUMBLEWEED_FRAME_COUNT;
-            static const uint8_t BOUNCE[8] = { 0, 1, 2, 1, 0, 1, 2, 1 };
-            bounce = BOUNCE[frame];
-        }
-        render_sprite(d->spr, (int)d->x, d->anchor_y - d->spr->h / 2 - bounce);
+        // 中景装饰底部对齐 MID 下边界，不进入 NEAR/碰撞地面。
+        render_sprite(d->spr, (int)d->x, d->anchor_y - d->spr->h);
+    }
+    static const uint8_t BOUNCE[8] = { 0, 1, 2, 1, 0, 1, 2, 1 };
+    for (int i = 0; i < TUMBLE_MID_COUNT; i++) {
+        tumbleweed_t *t = &s_tumble_mid[i];
+        int frame = (int)(t->roll_distance / TUMBLEWEED_FRAME_PX) % TUMBLEWEED_FRAME_COUNT;
+        int w = t->spr->w * 7 / 10;
+        int h = t->spr->h * 7 / 10;
+        int bounce = BOUNCE[frame] / 2;
+        render_sprite_scaled(t->spr, (int)t->x, t->anchor_y - h - bounce, w, h, 255);
     }
 }
 
@@ -293,5 +332,16 @@ void scenery_draw_ground_front(void)
     for (int i = 0; i < GROUND_NEAR_COUNT; i++) {
         depth_decor_t *d = &s_ground_near[i];
         render_sprite(d->spr, (int)d->x, d->anchor_y - d->spr->h / 2);
+    }
+    static const uint8_t BOUNCE[8] = { 0, 1, 2, 1, 0, 1, 2, 1 };
+    // tumbleweed.vox 的外框上下有透明体素；按每帧可见像素底边补偿，
+    // 并整体下移 3px，让 NEAR 风滚草更贴近地面而不显得飘浮。
+    static const uint8_t VISIBLE_BOTTOM_PAD[8] = { 6, 5, 6, 6, 6, 2, 5, 7 };
+    for (int i = 0; i < TUMBLE_NEAR_COUNT; i++) {
+        tumbleweed_t *t = &s_tumble_near[i];
+        int frame = (int)(t->roll_distance / TUMBLEWEED_FRAME_PX) % TUMBLEWEED_FRAME_COUNT;
+        render_sprite(t->spr, (int)t->x,
+                      t->anchor_y - t->spr->h + VISIBLE_BOTTOM_PAD[frame]
+                      - BOUNCE[frame] + 3);
     }
 }

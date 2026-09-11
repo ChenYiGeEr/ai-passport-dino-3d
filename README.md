@@ -60,6 +60,9 @@ node tools/bake_sprites.js   # .vox 体素 → 3D 像素精灵, 输出 main/spri
 
 ## 操作说明
 
+上/下键扩展动作、障碍分类、坐标锚点和新增障碍实现清单见
+[docs/gameplay-extension.md](docs/gameplay-extension.md)。
+
 - **Up**：跳跃（按住跳得更高；空中按住 Down 速降）
 - **跳跃缓冲**：落地前 80ms 内按下 Up，落地瞬间自动起跳
 - **Down**：按住下蹲，松开站起；下蹲中不能起跳（与原版一致）

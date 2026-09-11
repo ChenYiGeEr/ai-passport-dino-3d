@@ -18,6 +18,7 @@
 // 翼龙三种高度(相对地面线的抬升, K=2 精灵尺寸)
 #define PTERO_H_LOW     8
 #define PTERO_H_MID    40
+#define PTERO_H_HEAD   54
 #define PTERO_H_HIGH   70
 // 仙人掌成组("尾巴")概率, 原版 chance_to_spawn_tail = [100, 25]
 #define TAIL_CHANCE     25
@@ -145,8 +146,10 @@ static void spawn_ptero(void)
     o->ptero_frames[2]=&spr_ptero_2; o->ptero_frames[3]=&spr_ptero_3;
     o->ptero_frames[4]=&spr_ptero_4; o->ptero_frames[5]=&spr_ptero_5;
     o->x = (float)OBSTACLE_SPAWN_X;
-    int h = rand() % 3;
-    o->y = (float)(s_ground_y - (h == 0 ? PTERO_H_LOW : h == 1 ? PTERO_H_MID : PTERO_H_HIGH));
+    int h = rand() % 4;
+    int lift = h == 0 ? PTERO_H_LOW : h == 1 ? PTERO_H_MID
+              : h == 2 ? PTERO_H_HEAD : PTERO_H_HIGH;
+    o->y = (float)(s_ground_y - lift);
     o->anim_timer = 0;
     o->anim_frame = 0;
     o->active = true;
@@ -266,8 +269,8 @@ static void obs_hitbox(const obstacle_t *o, int *x, int *y, int *w, int *h)
         *w = 26;
         *h = 46;
     } else {
-        *x += 8; *w -= 16; // 翼龙翅膀不算碰撞
-        *y += 6; *h -= 12;
+        *x += 11; *w -= 22; // 翼龙翅膀不算碰撞, 头部高度档再收窄一点
+        *y += 7; *h -= 14;
     }
 }
 

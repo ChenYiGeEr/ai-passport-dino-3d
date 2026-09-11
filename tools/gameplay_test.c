@@ -48,7 +48,7 @@ static void test_jump_buffer(void)
     player_update(&p, 0.01f, true, false, 3);
     for (int i = 0; i < 120; i++) {
         player_update(&p, 0.01f, true, false, 3);
-        assert(p.y >= 60.0f - 0.001f);
+        assert(p.y >= 144.0f - 0.001f);
     }
 }
 

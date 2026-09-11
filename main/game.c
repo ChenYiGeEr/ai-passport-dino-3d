@@ -32,11 +32,12 @@
 static const char *TAG = "game";
 
 // ---- 布局(320x240 横屏, 2D 版 dino3d 沙漠场景) ----
-#define GROUND_Y      205   // 恐龙脚底(跑道面)
+#define GROUND_Y      216   // 恐龙/障碍物脚底(跑道面)
 #define DINO_X         40   // 恐龙水平位置
-#define FAR_TOP        86   // 远场景带起始(树/远景所在)
-#define RIVER_Y       150   // 河面起始
-#define FIELD_Y       174   // 近处跑道起始
+#define SKY_MID_Y       88   // SKY/MID 分界
+#define RIVER_Y       160   // MID 底部
+#define FIELD_Y       160   // MID/NEAR 分界
+#define DEBUG_DEPTH_GUIDES 1 // 调试景深线；确认颜色后改为 0 恢复正常画面
 
 // ---- 速度曲线 ----
 #define SPEED_BASE    180.0f // px/s(起步更快, 节奏对齐原版)
@@ -160,15 +161,6 @@ static uint16_t color_blend565(uint16_t a, uint16_t b, uint8_t mix)
     return (uint16_t)(((ar+(br-ar)*mix/255)<<11)|((ag+(bg-ag)*mix/255)<<5)|(ab+(bb-ab)*mix/255));
 }
 
-static uint16_t color_darken565(uint16_t c, uint8_t percent)
-{
-    int scale = 100 - percent;
-    int r = ((c >> 11) & 31) * scale / 100;
-    int g = ((c >> 5) & 63) * scale / 100;
-    int b = (c & 31) * scale / 100;
-    return (uint16_t)((r << 11) | (g << 5) | b);
-}
-
 static uint16_t scene_day_color(int layer)
 {
     uint16_t a[4], b[4];
@@ -180,14 +172,10 @@ static uint16_t scene_day_color(int layer)
     float m=scene_manager_mix(&s_scene); return color_blend565(ca,cb,(uint8_t)(m*255.0f+0.5f));
 }
 
-static uint16_t scene_day_far_color(void)
+static uint16_t scene_day_mid_color(void)
 {
-    uint16_t far = scene_day_color(SCENE_LAYER_FAR);
-    // 非沙漠远景是中景的深化版本，避免与天空和中景装饰撞色。
-    if (scene_manager_current(&s_scene) != SCENE_DESERT ||
-        scene_manager_next(&s_scene) != SCENE_DESERT)
-        far = color_darken565(far, 15);
-    return far;
+    // 原 FAR 色带的下 2/3 现在作为 MID，保留中等对比度。
+    return scene_day_color(SCENE_LAYER_FAR);
 }
 
 static void draw_scene_landmarks(scene_id_t scene, uint8_t opacity)
@@ -195,7 +183,7 @@ static void draw_scene_landmarks(scene_id_t scene, uint8_t opacity)
     render_set_opacity(opacity);
     const sprite_t *sprites[3] = {0};
     int xs[3] = { 18, 118, 230 };
-    int bottoms[3] = { 132, 148, 136 };
+    int bottoms[3] = { 160, 160, 160 };
     if (scene == SCENE_CANYON) {
         sprites[0] = &spr_canyon_bg_0; sprites[1] = &spr_canyon_bg_1; sprites[2] = &spr_canyon_bg_2;
         xs[0] = 16; xs[1] = 128; xs[2] = 244;
@@ -206,16 +194,17 @@ static void draw_scene_landmarks(scene_id_t scene, uint8_t opacity)
         sprites[0] = &spr_volcano_bg_0; sprites[1] = &spr_volcano_bg_1; sprites[2] = &spr_volcano_bg_2;
         xs[0] = 34; xs[1] = 146; xs[2] = 258;
     }
-    float far_scroll = scenery_scene_far_scroll();
     float mid_scroll = scenery_scene_mid_scroll();
     for (int i = 0; i < 3; i++) {
         if (!sprites[i]) continue;
-        float off = (i == 1) ? mid_scroll : far_scroll;
+        float off = mid_scroll;
         int x = xs[i] - (int)off;
         while (x + sprites[i]->w < -4) x += RENDER_SCREEN_W + 40;
         while (x > RENDER_SCREEN_W + 4) x -= RENDER_SCREEN_W + 40;
+        render_set_depth(RENDER_DEPTH_MID);
         render_sprite(sprites[i], x, bottoms[i] - sprites[i]->h);
     }
+    render_set_depth(RENDER_DEPTH_NEAR);
     render_set_opacity(255);
 }
 
@@ -234,15 +223,29 @@ static void draw_gradient_band(int y0, int y1, uint16_t from, uint16_t to)
     }
 }
 
-static void draw_background_layers(uint16_t sky, uint16_t far,
+static void draw_background_layers(uint16_t sky, uint16_t mid,
                                    uint16_t horizon, uint16_t ground)
 {
-    // 大块纯色区减少命令数量，天空—远景交界用 24px 渐变消除硬切线。
-    render_fill_rect(0, FAR_TOP, RENDER_SCREEN_W, FIELD_Y - FAR_TOP, far);
-    render_fill_rect(0, 144, RENDER_SCREEN_W, 14, horizon);
-    draw_gradient_band(FAR_TOP - 24, FAR_TOP, sky, far);
-    draw_gradient_band(126, 144, far, horizon);
-    draw_gradient_band(156, FIELD_Y, horizon, ground);
+    (void)horizon;
+    // MID 每个场景只使用一套颜色；只在 SKY/MID 和 MID/NEAR
+    // 交界保留窄渐变，避免出现同一中景被 horizon 色带割成两块。
+    render_fill_rect(0, SKY_MID_Y, RENDER_SCREEN_W, FIELD_Y - SKY_MID_Y, mid);
+    draw_gradient_band(SKY_MID_Y - 24, SKY_MID_Y, sky, mid);
+    draw_gradient_band(FIELD_Y - 4, FIELD_Y, mid, ground);
+    render_fill_rect(0, FIELD_Y, RENDER_SCREEN_W, GROUND_Y - FIELD_Y, ground);
+}
+
+static void draw_depth_guides(void)
+{
+#if DEBUG_DEPTH_GUIDES
+    const uint16_t red = RGB565(255, 0, 0);
+    // 3px 粗线：天空/中景、中景/近景。
+    render_fill_rect(0, SKY_MID_Y - 1, RENDER_SCREEN_W, 3, red);
+    render_fill_rect(0, FIELD_Y - 1, RENDER_SCREEN_W, 3, red);
+    hud_text("SKY", 4, SKY_MID_Y - 14, red);
+    hud_text("MID", 4, SKY_MID_Y + 5, red);
+    hud_text("NEAR", 4, FIELD_Y + 5, red);
+#endif
 }
 
 typedef struct {
@@ -560,26 +563,30 @@ static void draw_frame(int refresh_start_y)
     if (celestial_progress < 0) celestial_progress = 0;
     if (celestial_progress > 1) celestial_progress = 1;
 
-    // 背景: FAR_TOP 以下全是地面色, 远场带/河面覆盖上去
-    render_begin(sky, ground, FAR_TOP);
+    // 背景: SKY_MID_Y 以下为 MID/NEAR 地面色，顶部为 SKY。
+    render_begin(sky, ground, SKY_MID_Y);
     scenery_draw_sky(scene_day_color(SCENE_LAYER_CLOUD),
                      RGB565(120, 145, 180),
                      RGB565(210, 220, 240),
                      day_cycle_night_progress(&s_day_cycle), s_want_night,
                      celestial_progress, s_game_time_s);
 
-    draw_background_layers(sky, scene_day_far_color(),
+    draw_background_layers(sky, scene_day_mid_color(),
                            scene_day_color(SCENE_LAYER_HORIZON), ground);
-    scenery_draw_far();
+    render_set_depth(RENDER_DEPTH_MID);
+    scenery_draw_mid_back();
     draw_scene_landmarks(scene_manager_current(&s_scene), 255);
     if (scene_manager_transitioning(&s_scene))
         draw_scene_landmarks(scene_manager_next(&s_scene),
                              (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
 
+    render_set_depth(RENDER_DEPTH_MID);
     scenery_draw_ground_back(scene_day_color(SCENE_LAYER_SPECKLE));
     dust_draw(scene_day_color(SCENE_LAYER_DUST_NEAR), scene_day_color(SCENE_LAYER_DUST_FAR));
+    draw_depth_guides();
 
     uint8_t shadow = shadow_opacity();
+    render_set_depth(RENDER_DEPTH_NEAR);
     obstacles_set_shadow_opacity(shadow);
     obstacles_draw();
     fragments_draw();
@@ -603,6 +610,7 @@ static void draw_frame(int refresh_start_y)
     if (!blink_out)
         render_sprite(player_sprite(&s_player), dx, dy);
 
+    render_set_depth(RENDER_DEPTH_NEAR);
     scenery_draw_ground_front();
 
     draw_heart_pickup_fx();
@@ -643,7 +651,7 @@ void game_run(void)
     s_hi_score = hi_score_load();
     player_init(&s_player, DINO_X, GROUND_Y);
     obstacles_init(GROUND_Y);
-    scenery_init(GROUND_Y, FAR_TOP, RIVER_Y, FIELD_Y);
+    scenery_init(GROUND_Y, SKY_MID_Y, RIVER_Y, FIELD_Y);
     game_reset();
     s_state = ST_READY;
 
@@ -963,7 +971,7 @@ void game_run(void)
                 }
 
                 if (!force_full_refresh) {
-                    refresh_start_y = FAR_TOP;
+                    refresh_start_y = SKY_MID_Y;
                     if (current_dino_top < refresh_start_y)
                         refresh_start_y = current_dino_top;
                     if (previous_dino_top < refresh_start_y)
