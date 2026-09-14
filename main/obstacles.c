@@ -18,9 +18,8 @@
 #define PTERO_MIN_SCORE 450
 // 翼龙三种高度(相对地面线的抬升, K=2 精灵尺寸)
 #define PTERO_H_LOW     8
-#define PTERO_H_MID    40
-#define PTERO_H_HEAD   54
-#define PTERO_H_HIGH   70
+#define PTERO_H_MID    20
+#define PTERO_H_HIGH   35
 // 仙人掌成组("尾巴")概率, 原版 chance_to_spawn_tail = [100, 25]
 #define TAIL_CHANCE     25
 // 红心生成: 每 1000 分保底一颗 + 每次生成障碍 2% 概率; 满心不出
@@ -200,8 +199,7 @@ static void spawn_ptero(void)
     o->x = (float)OBSTACLE_SPAWN_X;
     // 头顶翼龙约占飞行障碍的 2/3，对应总生成权重约 20%。
     int h = (rand() % 3 == 0) ? (rand() % 3 == 0 ? 0 : 1 + rand() % 2) : 2;
-    int lift = h == 0 ? PTERO_H_LOW : h == 1 ? PTERO_H_MID
-              : h == 2 ? PTERO_H_HEAD : PTERO_H_HIGH;
+    int lift = h == 0 ? PTERO_H_LOW : h == 1 ? PTERO_H_MID : PTERO_H_HIGH;
     o->y = (float)(s_ground_y - lift);
     o->anim_timer = 0;
     o->anim_frame = 0;

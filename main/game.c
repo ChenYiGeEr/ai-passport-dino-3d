@@ -38,7 +38,7 @@ static const char *TAG = "game";
 #define SKY_MID_Y       88   // SKY/MID 分界
 #define RIVER_Y       160   // MID 底部
 #define FIELD_Y       160   // MID/NEAR 分界
-#define DEBUG_DEPTH_GUIDES 1 // 调试景深线；确认颜色后改为 0 恢复正常画面
+#define DEBUG_DEPTH_GUIDES 0 // 调试景深线；确认颜色后改为 0 恢复正常画面
 
 // ---- 速度曲线 ----
 #define SPEED_BASE    180.0f // px/s(起步更快, 节奏对齐原版)
