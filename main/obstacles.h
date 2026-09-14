@@ -27,6 +27,7 @@ typedef struct {
     float anim_timer;
     int anim_frame;
     int variant;
+    bool destructible;
 } obstacle_t;
 
 void obstacles_init(int ground_y);
@@ -52,3 +53,7 @@ void obstacles_visual_center(int idx, int *x, int *y);
 
 // 移除障碍物(吃掉红心/撞碎仙人掌时用)。
 void obstacles_remove(int idx);
+
+// 踩踏支持：返回实例是否可破坏，并在成功时移除障碍。
+bool obstacles_is_destructible(int idx);
+bool obstacles_stomp(int idx);

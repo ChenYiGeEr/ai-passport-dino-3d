@@ -27,6 +27,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "bsp_display.h"
+#include "bsp_battery.h"
 #include <stdio.h>
 
 static const char *TAG = "game";
@@ -58,6 +59,7 @@ static const char *TAG = "game";
 #define SETTINGS_FADE_US    150000 // 进入/退出设置 150ms
 #define SETTINGS_FADE_STEPS      5 // 量化为 5 档，约 30 FPS
 #define SETTINGS_DIM_RETAIN    128 // 完全展开时背景保留约 50% 亮度
+#define BATTERY_REFRESH_US 5000000LL
 
 // ---- 颜色(对齐 dino3d 沙漠色调) ----
 #define SKY_DAY       RGB565(238, 203, 110)  // 沙漠黄(原作天空与沙同色)
@@ -95,6 +97,10 @@ static const char *TAG = "game";
 static const uint16_t INK_COLORS[] = {
     RGB565(60, 50, 30), RGB565(67, 43, 28), RGB565(170, 154, 170), RGB565(200, 200, 220)
 };
+
+static int s_battery_soc = -1;
+static bool s_battery_charging;
+static int64_t s_battery_next_refresh_us;
 
 typedef enum {
     ST_READY,      // 待机: 恐龙站立, 按 UP 开跑
@@ -289,9 +295,19 @@ static const int BL_LEVELS[]  = { 20, 40, 60, 80, 100 };
 static int s_vol_idx = 3;   // 默认 60%
 static int s_bl_idx = 3;    // 默认 80%
 static bool s_invincible_mode; // 调试无敌模式，默认关闭
-static int s_menu_row;      // 0=音量 1=背光
+static int s_menu_row;      // 0=教程 1=无敌 2=音量 3=背光
 static bool s_editing;      // 是否在某一项的配置态(Up/Down 调值)
+static bool s_tutorial;
+static int s_tutorial_page;
 static game_state_t s_return_state; // 退出设置后回到哪里
+
+// 游戏动作输入状态：ADC 没有通用松开事件，因此在游戏层累计按住时间。
+static float s_up_hold_s;
+static float s_down_hold_s;
+static game_key_t s_last_action_key;
+static float s_last_action_time_s;
+#define ACTION_LONG_PRESS_S 0.160f
+#define ACTION_COMBO_S 0.180f
 
 // ---- 最高分持久化(NVS) ----
 static uint32_t hi_score_load(void)
@@ -478,6 +494,12 @@ static void game_reset(void)
     render_set_scene_mix(SCENE_DESERT, SCENE_DESERT, 0);
     s_death_feedback = false;
     s_death_feedback_s = 0;
+    s_up_hold_s = 0;
+    s_down_hold_s = 0;
+    s_last_action_key = KEY_NONE;
+    s_last_action_time_s = -10.0f;
+    s_tutorial = false;
+    s_tutorial_page = 0;
     for (int i=0;i<5;i++) s_fragments[i].active=false;
 }
 
@@ -492,16 +514,37 @@ static void draw_settings(void)
     render_fill_rect(px, py, 2, ph, SETTINGS_INK);
     render_fill_rect(px + pw - 2, py, 2, ph, SETTINGS_INK);
 
-    hud_text("SETTINGS", px + 14, py + 10, SETTINGS_INK);
+    hud_text(s_tutorial ? "HOW TO PLAY" : "SETTINGS", px + 14, py + 10, SETTINGS_INK);
+
+    if (s_tutorial) {
+        static const char *TITLE[4] = {
+            "BASIC JUMP", "AIR ACTION", "DOWN ACTION", "COMBOS"
+        };
+        static const char *LINES[4][3] = {
+            { "UP TAP SMALL JUMP", "UP HOLD HIGH JUMP", "AIR UP 2ND JUMP" },
+            { "AIR UP GLIDE", "AIR DOWN FAST FALL", "DOWN STOMP ENEMY" },
+            { "DOWN TAP CROUCH", "DOWN HOLD SLIDE", "LAND DOWN ROLL" },
+            { "DOWN UP CHARGE JUMP", "UP DOWN GROUND SMASH", "USE DOWN FOR PTERO" },
+        };
+        hud_text(TITLE[s_tutorial_page], px + 14, py + 30, SETTINGS_INK);
+        for (int i = 0; i < 3; i++)
+            hud_text(LINES[s_tutorial_page][i], px + 8, py + 48 + i * 14, SETTINGS_INK);
+        char page[24];
+        snprintf(page, sizeof(page), "PAGE %d OF 4", s_tutorial_page + 1);
+        hud_text(page, px + 64, py + 94, SETTINGS_INK);
+        return;
+    }
 
     char buf[24];
-    const char *labels[3] = { "INVINCIBLE", "VOLUME", "LIGHT" };
-    for (int i = 0; i < 3; i++) {
-        int ry = py + 34 + i * 22;
+    const char *labels[4] = { "HOW TO PLAY", "INVINCIBLE", "VOLUME", "LIGHT" };
+    for (int i = 0; i < 4; i++) {
+        int ry = py + 28 + i * 16;
         if (i == 0)
+            snprintf(buf, sizeof(buf), "%s", labels[i]);
+        else if (i == 1)
             snprintf(buf, sizeof(buf), "%s < %s >", labels[i],
                      s_invincible_mode ? "ON" : "OFF");
-        else if (i == 1)
+        else if (i == 2)
             snprintf(buf, sizeof(buf), "%s < %d%% >", labels[i], VOL_LEVELS[s_vol_idx]);
         else
             snprintf(buf, sizeof(buf), "%s < %d%% >", labels[i], BL_LEVELS[s_bl_idx]);
@@ -622,6 +665,7 @@ static void draw_frame(int refresh_start_y)
     bool blink = s_game_time_s < s_flash_until &&
                  (((uint32_t)(s_game_time_s * 5.0f)) & 1);
     hud_draw_scores((uint32_t)s_score, s_hi_score, !blink, ink);
+    hud_draw_battery(s_battery_soc, s_battery_charging, ink);
     if (s_invincible_mode)
         hud_text("INV", 166, 8, RGB565(150, 240, 255));
 
@@ -648,6 +692,14 @@ void game_run(void)
     settings_apply(); // 音量 + 背光按上次设置生效
     srand(esp_random());
 
+    if (bsp_battery_init() == ESP_OK) {
+        s_battery_soc = bsp_battery_soc();
+        s_battery_charging = bsp_battery_charging();
+    } else {
+        s_battery_soc = -1;
+        s_battery_charging = false;
+    }
+
     s_hi_score = hi_score_load();
     player_init(&s_player, DINO_X, GROUND_Y);
     obstacles_init(GROUND_Y);
@@ -658,6 +710,7 @@ void game_run(void)
     int64_t last = esp_timer_get_time();
     int64_t next_frame_deadline_us = last;
     int64_t next_sky_refresh_us = last + SKY_REFRESH_US;
+    s_battery_next_refresh_us = last + BATTERY_REFRESH_US;
     int previous_dino_top;
     int previous_scenery_top = scenery_dynamic_top();
     float sky_scroll_px = 0;
@@ -707,6 +760,9 @@ void game_run(void)
             idle_sleep_consumes_input(&s_idle_sleep)) {
             input_discard_events();
             if (idle_event == IDLE_SLEEP_EVENT_WAKE) {
+                s_battery_soc = bsp_battery_soc();
+                s_battery_charging = bsp_battery_charging();
+                s_battery_next_refresh_us = frame_start + BATTERY_REFRESH_US;
                 draw_frame(0);
                 int ignored_x;
                 player_draw_pos(&s_player, &ignored_x, &previous_dino_top);
@@ -729,6 +785,23 @@ void game_run(void)
         bool transition_was_active = s_settings_fade.active;
         bool transition_redraw = settings_fade_update(frame_start);
         bool heart_effect_redraw = false;
+        bool battery_redraw = false;
+        if (frame_start >= s_battery_next_refresh_us) {
+            int soc = bsp_battery_soc();
+            bool charging = bsp_battery_charging();
+            battery_redraw = soc != s_battery_soc || charging != s_battery_charging;
+            s_battery_soc = soc;
+            s_battery_charging = charging;
+            s_battery_next_refresh_us = frame_start + BATTERY_REFRESH_US;
+        }
+
+        if (s_state == ST_RUNNING) {
+            s_up_hold_s = up_held ? s_up_hold_s + dt : 0;
+            s_down_hold_s = down_held ? s_down_hold_s + dt : 0;
+        } else {
+            s_up_hold_s = 0;
+            s_down_hold_s = 0;
+        }
 
         // 长按 OK: 进入/退出设置菜单(任何状态下可用)
         if (transition_was_active || s_settings_fade.active) {
@@ -742,6 +815,8 @@ void game_run(void)
                 s_return_state = (s_state == ST_RUNNING) ? ST_PAUSED : s_state;
                 s_menu_row = 0;
                 s_editing = false;
+                s_tutorial = false;
+                s_tutorial_page = 0;
                 s_state = ST_SETTINGS;
                 settings_fade_start(true, frame_start);
             }
@@ -761,7 +836,24 @@ void game_run(void)
 
         case ST_RUNNING:
             if (press == KEY_OK) { s_state = ST_PAUSED; break; }
-            if (press == KEY_UP) player_queue_jump(&s_player);
+            if (press == KEY_UP) {
+                bool combo = s_last_action_key == KEY_DOWN &&
+                             s_game_time_s - s_last_action_time_s <= ACTION_COMBO_S;
+                player_set_action(&s_player, PLAYER_ACTION_NONE);
+                if (combo) {
+                    if (player_trigger_charge_jump(&s_player)) sfx_play(SFX_JUMP);
+                } else {
+                    player_queue_jump(&s_player);
+                }
+                s_last_action_key = KEY_UP;
+                s_last_action_time_s = s_game_time_s;
+            } else if (press == KEY_DOWN) {
+                bool combo = s_last_action_key == KEY_UP &&
+                             s_game_time_s - s_last_action_time_s <= ACTION_COMBO_S;
+                if (combo) player_trigger_stomp(&s_player);
+                s_last_action_key = KEY_DOWN;
+                s_last_action_time_s = s_game_time_s;
+            }
 
             s_game_time_s += dt;
             fragments_update(dt);
@@ -812,10 +904,20 @@ void game_run(void)
             }
 
             {
+                player_action_t action = PLAYER_ACTION_NONE;
+                if (!s_player.on_ground && up_held && s_player.vel_y < 0 &&
+                    s_up_hold_s >= ACTION_LONG_PRESS_S)
+                    action = PLAYER_ACTION_GLIDE;
+                else if (s_player.on_ground && down_held)
+                    action = s_down_hold_s >= ACTION_LONG_PRESS_S
+                           ? PLAYER_ACTION_SLIDE : PLAYER_ACTION_CROUCH;
+                player_set_action(&s_player, action);
                 player_event_t events = player_update(&s_player, dt, up_held,
                                                       down_held, speed_level());
                 if (events & PLAYER_EVENT_LANDED)
                     dust_emit_land((int)s_player.x, GROUND_Y);
+                if ((events & PLAYER_EVENT_LANDED) && down_held)
+                    player_trigger_roll(&s_player);
                 if (events & PLAYER_EVENT_JUMPED)
                     sfx_play(SFX_JUMP);
             }
@@ -847,7 +949,16 @@ void game_run(void)
                             s_hud_heart_pop_started_at = s_game_time_s;
                             sfx_play(SFX_HEART);
                         }
-                    } else if (!s_invincible_mode && s_game_time_s >= s_invincible_until) {
+                    } else if (player_is_stomping(&s_player) &&
+                               obstacles_is_destructible(hit)) {
+                        int fx, fy;
+                        obstacles_visual_center(hit, &fx, &fy);
+                        obstacles_stomp(hit);
+                        fragments_emit(fx, fy);
+                        s_player.vel_y = 240.0f;
+                        s_player.stomping = false;
+                    } else if (!s_invincible_mode && !player_is_rolling(&s_player) &&
+                               s_game_time_s >= s_invincible_until) {
                         int fx, fy;
                         obstacles_visual_center(hit, &fx, &fy);
                         fragments_emit(fx, fy);
@@ -888,20 +999,33 @@ void game_run(void)
             // 列表态: UP/DOWN 选行, OK 单击进入该项配置
             // 配置态: UP 调高 / DOWN 调低, OK 单击退出配置
             // (此状态下所有按键都被这里消费, 不会触发跳跃/下蹲/暂停/音效)
-            if (!s_editing) {
-                if (press == KEY_UP) {
-                    s_menu_row = (s_menu_row + 2) % 3;
-                } else if (press == KEY_DOWN) {
-                    s_menu_row = (s_menu_row + 1) % 3;
+            if (s_tutorial) {
+                if (press == KEY_UP)
+                    s_tutorial_page = (s_tutorial_page + 3) % 4;
+                else if (press == KEY_DOWN)
+                    s_tutorial_page = (s_tutorial_page + 1) % 4;
+                if (click == KEY_OK) {
+                    s_tutorial = false;
+                    s_tutorial_page = 0;
                 }
-                if (click == KEY_OK)
+            } else if (!s_editing) {
+                if (press == KEY_UP) {
+                    s_menu_row = (s_menu_row + 3) % 4;
+                } else if (press == KEY_DOWN) {
+                    s_menu_row = (s_menu_row + 1) % 4;
+                }
+                if (click == KEY_OK && s_menu_row == 0) {
+                    s_tutorial = true;
+                    s_tutorial_page = 0;
+                } else if (click == KEY_OK) {
                     s_editing = true;
+                }
             } else {
                 int dir = (press == KEY_UP) ? 1 : (press == KEY_DOWN) ? -1 : 0;
                 if (dir != 0) {
-                    if (s_menu_row == 0) {
+                    if (s_menu_row == 1) {
                         s_invincible_mode = dir > 0;
-                    } else if (s_menu_row == 1) {
+                    } else if (s_menu_row == 2) {
                         s_vol_idx += dir;
                         if (s_vol_idx < 0) s_vol_idx = 0;
                         if (s_vol_idx >= VOL_COUNT) s_vol_idx = VOL_COUNT - 1;
@@ -926,7 +1050,7 @@ void game_run(void)
                               long_press != KEY_NONE;
         bool force_full_refresh = state_changed || s_lives != lives_before ||
                                   transition_redraw || s_hud_heart_pop_active ||
-                                  heart_effect_redraw;
+                                  heart_effect_redraw || battery_redraw;
 
         if (s_state != ST_RUNNING && (force_full_refresh || input_activity))
             redraw_requested = true;

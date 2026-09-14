@@ -17,6 +17,15 @@ typedef struct {
     int anim_frame;      // 当前动画帧
     float anim_timer;    // 帧切换计时
     float jump_buffer_s; // 落地前预输入的剩余有效时间
+    float air_time_s;
+    int jump_count;
+    bool double_jump_pending;
+    bool sliding;
+    bool gliding;
+    bool rolling;
+    bool stomping;
+    float roll_s;
+    int action_frame;
 } player_t;
 
 #define PLAYER_JUMP_BUFFER_S 0.080f
@@ -25,7 +34,18 @@ typedef enum {
     PLAYER_EVENT_NONE   = 0,
     PLAYER_EVENT_JUMPED = 1 << 0,
     PLAYER_EVENT_LANDED = 1 << 1,
+    PLAYER_EVENT_DOUBLE_JUMPED = 1 << 2,
+    PLAYER_EVENT_STOMP_LANDED = 1 << 3,
 } player_event_t;
+
+typedef enum {
+    PLAYER_ACTION_NONE = 0,
+    PLAYER_ACTION_CROUCH,
+    PLAYER_ACTION_SLIDE,
+    PLAYER_ACTION_GLIDE,
+    PLAYER_ACTION_ROLL,
+    PLAYER_ACTION_STOMP,
+} player_action_t;
 
 void player_init(player_t *p, int ground_x, int ground_y);
 void player_reset(player_t *p);
@@ -35,6 +55,14 @@ bool player_jump(player_t *p);
 
 // 记录一次跳跃输入；若尚未落地，会在 80ms 内于落地瞬间自动起跳。
 void player_queue_jump(player_t *p);
+
+// 由游戏层根据按键时长/连招设置本帧动作。
+void player_set_action(player_t *p, player_action_t action);
+void player_trigger_roll(player_t *p);
+bool player_trigger_charge_jump(player_t *p);
+void player_trigger_stomp(player_t *p);
+bool player_is_stomping(const player_t *p);
+bool player_is_rolling(const player_t *p);
 
 // 每帧更新。dt 秒; up_held/down_held 为本帧按键按住状态。
 // speed_level 0..3 对应原版四档速度,影响跳跃初速与动画节奏。

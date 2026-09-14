@@ -3,6 +3,7 @@
 // BSP 写入自定义电池 profile,芯片直接给 SOC%,无需外部分压电阻与查表。
 #pragma once
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 // 初始化。内部会调 bsp_i2c_init()(幂等)。
@@ -14,3 +15,6 @@ int bsp_battery_soc(void);
 
 // 电池电压 mV;读失败返回 -1。
 int bsp_battery_mv(void);
+
+// 充电状态。未配置板级检测脚或读取失败时返回 false。
+bool bsp_battery_charging(void);

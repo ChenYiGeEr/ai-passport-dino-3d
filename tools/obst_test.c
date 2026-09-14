@@ -1,6 +1,7 @@
 // tools/obst_test.c — 主机端仿真障碍物生成, 统计翼龙出现频率。
 // 用法: gcc -I main tools/obst_test.c main/sprites.c -o /tmp/obst_test && /tmp/obst_test
 #include <stdio.h>
+#include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -23,6 +24,22 @@ int main(void)
 {
     srand(1234);
     obstacles_init(205);
+
+    // 每个仙人掌波都必须让小尺寸和中/大尺寸成组出现。
+    for (int trial = 0; trial < 500; trial++) {
+        obstacles_reset();
+        spawn_cactus(2);
+        bool has_small = false;
+        bool has_large = false;
+        for (int i = 0; i < OBSTACLE_POOL; i++) {
+            if (!s_pool[i].active || s_pool[i].type != OBS_CACTUS) continue;
+            if (ground_size_slot(SCENE_DESERT, s_pool[i].variant) == 0)
+                has_small = true;
+            else
+                has_large = true;
+        }
+        assert(!has_small || has_large);
+    }
 
     int cactus_spawned = 0, ptero_spawned = 0, heart_spawned = 0;
     bool prev_active[OBSTACLE_POOL] = {0};

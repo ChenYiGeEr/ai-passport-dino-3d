@@ -298,6 +298,36 @@ addAsciiSprite('volcano_vent_0', obstacleRows('G', 'G', 'L'), 2, VOLCANO_VENT_CO
 addAsciiSprite('volcano_vent_1', obstacleRows('D', 'G', 'L'), 2, VOLCANO_VENT_COLORS);
 addAsciiSprite('volcano_vent_2', obstacleRows('L', 'G', 'D'), 2, VOLCANO_VENT_COLORS);
 
+/* 输入扩展动作：独立离线烘焙，保持恐龙黄棕色调。 */
+const DINO_ACTION_COLORS = {
+    L: rgb565num(249, 185, 54),
+    G: rgb565num(166, 111, 48),
+    D: rgb565num(111, 72, 37),
+};
+const SLIDE_ROWS = [
+    ['.....LLL.....','...LGGGLL....','..LGGGGGGLL..','LGGGGGGGGGG..',
+     'DDGGGGGGGGGD.','DDDDDDDDDDDDD.'],
+    ['....LLLL.....','..LGGGGLL....','.LGGGGGGGLL...','LGGGGGGGGGG... ',
+     'DDGGGGGGGGGD.','DDDDDDDDDDDDD.'],
+    ['.....LLL.....','...LGGGLL....','..LGGGGGGLL..','LGGGGGGGGGG..',
+     'DDGGGGGGGGGD.','DDDDDDDDDDDDD.'],
+    ['....LLLL.....','..LGGGGLL....','.LGGGGGGGLL...','LGGGGGGGGGG...',
+     'DDGGGGGGGGGD.','DDDDDDDDDDDDD.'],
+];
+for (let i = 0; i < SLIDE_ROWS.length; i++) addAsciiSprite(`dino_slide_${i}`, SLIDE_ROWS[i], 3, DINO_ACTION_COLORS);
+const ROLL_ROWS = [
+    ['...LLLL...','..LGGGLL..','.LGGGGGLL.','LGGGGGGLL.','LGGGGGGGG.','DDGGGGGGD.','DDDDDDDDD.'],
+    ['..LLLLLL..','.LGGGGGLL.','LGGGGGGGG.','LGGGGGGGG.','DDGGGGGGD.','DDDDDDDDD.','..DDDDD...'],
+    ['...LLLL...','..LGGGLL..','.LGGGGGLL.','LGGGGGGLL.','LGGGGGGGG.','DDGGGGGGD.','DDDDDDDDD.'],
+    ['..LLLLLL..','.LGGGGGLL.','LGGGGGGGG.','LGGGGGGGG.','DDGGGGGGD.','DDDDDDDDD.','..DDDDD...'],
+];
+for (let i = 0; i < ROLL_ROWS.length; i++) addAsciiSprite(`dino_roll_${i}`, ROLL_ROWS[i], 3, DINO_ACTION_COLORS);
+const GLIDE_ROWS = [
+    ['..LL..','LGGGGL','GGGGGG','DDDDDD'],
+    ['.LLLL.','LGGGGL','GGGGGG','DDDDDD'],
+];
+for (let i = 0; i < GLIDE_ROWS.length; i++) addAsciiSprite(`dino_glide_${i}`, GLIDE_ROWS[i], 2, DINO_ACTION_COLORS);
+
 const DRY_GRASS_COLORS = {
     L: rgb565num(218, 177, 84),
     G: rgb565num(174, 127, 52),

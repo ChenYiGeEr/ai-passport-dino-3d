@@ -3,6 +3,7 @@
 #include "hud.h"
 #include "render.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define FONT_SCALE 2
@@ -47,6 +48,13 @@ static const uint8_t FONT_DIGITS[10][5] = {
 #define CH_LT 30
 #define CH_GT 31
 #define CH_N 32
+#define CH_F 33
+#define CH_J 34
+#define CH_Q 35
+#define CH_W 36
+#define CH_X 37
+#define CH_Y 38
+#define CH_DASH 39
 
 static const uint8_t FONT_ALPHA[][5] = {
     {0b111, 0b101, 0b111, 0b101, 0b101}, // A
@@ -72,6 +80,13 @@ static const uint8_t FONT_ALPHA[][5] = {
     {0b001, 0b010, 0b100, 0b010, 0b001}, // <
     {0b100, 0b010, 0b001, 0b010, 0b100}, // >
     {0b110, 0b111, 0b111, 0b101, 0b101}, // N
+    {0b111, 0b100, 0b110, 0b100, 0b100}, // F
+    {0b001, 0b001, 0b001, 0b101, 0b111}, // J
+    {0b111, 0b101, 0b111, 0b011, 0b001}, // Q
+    {0b101, 0b101, 0b111, 0b111, 0b101}, // W
+    {0b101, 0b101, 0b010, 0b101, 0b101}, // X
+    {0b101, 0b101, 0b010, 0b010, 0b010}, // Y
+    {0b000, 0b000, 0b111, 0b000, 0b000}, // -
 };
 
 static void draw_glyph_scaled(int idx, int x, int y, int scale, uint16_t color)
@@ -103,6 +118,9 @@ static int glyph_index(char c)
     case 'K': return CH_K; case 'L': return CH_L; case 'T': return CH_T;
     case '%': return CH_PCT; case '<': return CH_LT; case '>': return CH_GT;
     case 'N': return CH_N;
+    case 'F': return CH_F; case 'J': return CH_J; case 'Q': return CH_Q;
+    case 'W': return CH_W; case 'X': return CH_X; case 'Y': return CH_Y;
+    case '-': return CH_DASH;
     default: return CH_SPACE;
     }
 }
@@ -157,6 +175,48 @@ void hud_draw_scores(uint32_t score, uint32_t hi_score, bool blink_on, uint16_t 
     x += CHAR_GAP;
     if (blink_on)
         draw_number(score, 5, x, 8, color);
+}
+
+static uint16_t battery_color(int soc)
+{
+    if (soc >= 0 && soc <= 10) return RGB565(230, 70, 55);
+    if (soc >= 0 && soc <= 30) return RGB565(235, 150, 45);
+    return RGB565(60, 190, 95);
+}
+
+void hud_draw_battery(int soc, bool charging, uint16_t color)
+{
+    const int x = RENDER_SCREEN_W - 74;
+    const int y = 26;
+    const int body_w = 20;
+    const int body_h = 10;
+    uint16_t fill = battery_color(soc);
+
+    // 固定占位，避免读取失败或充电状态变化时 HUD 跳动。
+    render_fill_rect(x, y, body_w, 2, color);
+    render_fill_rect(x, y + body_h - 2, body_w, 2, color);
+    render_fill_rect(x, y, 2, body_h, color);
+    render_fill_rect(x + body_w - 2, y, 2, body_h, color);
+    render_fill_rect(x + body_w, y + 3, 3, 4, color);
+    if (soc >= 0) {
+        int clamped = soc > 100 ? 100 : soc;
+        int fill_w = (body_w - 4) * clamped / 100;
+        if (fill_w > 0)
+            render_fill_rect(x + 2, y + 2, fill_w, body_h - 4, fill);
+        char pct[8];
+        snprintf(pct, sizeof(pct), "%d%%", clamped);
+        hud_text(pct, x + 27, y, fill);
+    } else {
+        hud_text("--%", x + 27, y, color);
+    }
+
+    if (charging) {
+        // 3x5 像素闪电，叠在电池主体左侧，避免增加布局宽度。
+        uint16_t bolt = RGB565(245, 205, 55);
+        render_fill_rect(x + 9, y - 2, 4, 4, bolt);
+        render_fill_rect(x + 7, y + 2, 4, 4, bolt);
+        render_fill_rect(x + 5, y + 6, 4, 4, bolt);
+    }
 }
 
 void hud_draw_game_over(uint16_t color)

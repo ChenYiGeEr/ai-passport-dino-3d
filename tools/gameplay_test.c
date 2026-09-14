@@ -77,10 +77,45 @@ static void test_day_cycle(void)
     assert(cycle.phase == 0);
 }
 
+static void test_action_extensions(void)
+{
+    player_t p;
+    player_init(&p, 40, 216);
+    player_queue_jump(&p);
+    player_update(&p, 0.01f, true, false, 0);
+    player_update(&p, 0.10f, false, false, 0);
+    player_queue_jump(&p);
+    player_event_t e = player_update(&p, 0.01f, true, false, 0);
+    assert(e & PLAYER_EVENT_DOUBLE_JUMPED);
+    assert(p.jump_count == 2);
+
+    player_reset(&p);
+    player_set_action(&p, PLAYER_ACTION_SLIDE);
+    player_update(&p, 0.01f, false, true, 0);
+    int x, y, w, h;
+    player_hitbox(&p, &x, &y, &w, &h);
+    assert(w == 42 && h == 18);
+
+    player_reset(&p);
+    player_trigger_roll(&p);
+    assert(player_is_rolling(&p));
+    player_update(&p, 0.31f, false, false, 0);
+    assert(!player_is_rolling(&p));
+
+    player_reset(&p);
+    player_queue_jump(&p);
+    player_update(&p, 0.01f, true, false, 0);
+    for (int i = 0; i < 50; i++) player_update(&p, 0.01f, false, false, 0);
+    player_set_action(&p, PLAYER_ACTION_GLIDE);
+    player_update(&p, 0.01f, true, false, 0);
+    assert(p.gliding);
+}
+
 int main(void)
 {
     test_jump_buffer();
     test_day_cycle();
+    test_action_extensions();
     puts("gameplay_test: ok");
     return 0;
 }

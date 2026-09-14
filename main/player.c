@@ -25,8 +25,21 @@ static const sprite_t *DOWN_FRAMES[] = {
     &spr_dino_down_0, &spr_dino_down_1, &spr_dino_down_2, &spr_dino_down_3,
     &spr_dino_down_4, &spr_dino_down_5, &spr_dino_down_6, &spr_dino_down_7,
 };
+static const sprite_t *SLIDE_FRAMES[] = {
+    &spr_dino_slide_0, &spr_dino_slide_1, &spr_dino_slide_2, &spr_dino_slide_3,
+};
+static const sprite_t *ROLL_FRAMES[] = {
+    &spr_dino_roll_0, &spr_dino_roll_1, &spr_dino_roll_2, &spr_dino_roll_3,
+};
+static const sprite_t *GLIDE_FRAMES[] = { &spr_dino_glide_0, &spr_dino_glide_1 };
 #define FRAME_COUNT 12
 #define DOWN_FRAME_COUNT 8
+#define SLIDE_FRAME_COUNT 4
+#define ROLL_FRAME_COUNT 4
+#define GLIDE_FRAME_COUNT 2
+#define DOUBLE_JUMP_WINDOW_S 0.650f
+#define GLIDE_MAX_S 0.700f
+#define ROLL_DURATION_S 0.300f
 
 static int s_ground_x, s_ground_y;
 
@@ -49,6 +62,15 @@ void player_reset(player_t *p)
     p->anim_frame = 0;
     p->anim_timer = 0;
     p->jump_buffer_s = 0;
+    p->air_time_s = 0;
+    p->jump_count = 0;
+    p->double_jump_pending = false;
+    p->sliding = false;
+    p->gliding = false;
+    p->rolling = false;
+    p->stomping = false;
+    p->roll_s = 0;
+    p->action_frame = 0;
 }
 
 bool player_jump(player_t *p)
@@ -57,13 +79,62 @@ bool player_jump(player_t *p)
     if (!p->on_ground || p->crouching || p->dead) return false;
     p->vel_y = p->jump_vel;
     p->on_ground = false;
+    p->jump_count = 1;
+    p->air_time_s = 0;
     return true;
 }
 
 void player_queue_jump(player_t *p)
 {
     if (!p->dead) p->jump_buffer_s = PLAYER_JUMP_BUFFER_S;
+    if (!p->dead && !p->on_ground && p->jump_count == 1 &&
+        p->air_time_s <= DOUBLE_JUMP_WINDOW_S)
+        p->double_jump_pending = true;
 }
+
+void player_set_action(player_t *p, player_action_t action)
+{
+    if (p->dead) return;
+    p->sliding = action == PLAYER_ACTION_SLIDE && p->on_ground && !p->rolling;
+    p->gliding = action == PLAYER_ACTION_GLIDE && !p->on_ground && p->vel_y < 0;
+    if (action == PLAYER_ACTION_ROLL) player_trigger_roll(p);
+    if (action == PLAYER_ACTION_STOMP) player_trigger_stomp(p);
+}
+
+void player_trigger_roll(player_t *p)
+{
+    if (!p->dead && p->on_ground) {
+        p->rolling = true;
+        p->roll_s = ROLL_DURATION_S;
+        p->sliding = false;
+        p->action_frame = 0;
+    }
+}
+
+bool player_trigger_charge_jump(player_t *p)
+{
+    if (p->dead || !p->on_ground) return false;
+    p->crouching = false;
+    p->sliding = false;
+    p->vel_y = p->jump_vel * 0.85f;
+    p->on_ground = false;
+    p->jump_count = 1;
+    p->air_time_s = 0;
+    p->jump_buffer_s = 0;
+    return true;
+}
+
+void player_trigger_stomp(player_t *p)
+{
+    if (!p->dead && !p->on_ground) {
+        p->stomping = true;
+        p->gliding = false;
+        if (p->vel_y > -240.0f) p->vel_y = -240.0f;
+    }
+}
+
+bool player_is_stomping(const player_t *p) { return p->stomping; }
+bool player_is_rolling(const player_t *p) { return p->rolling; }
 
 player_event_t player_update(player_t *p, float dt, bool up_held,
                              bool down_held, int speed_level)
@@ -74,8 +145,12 @@ player_event_t player_update(player_t *p, float dt, bool up_held,
     // 跳跃初速随速度档提高(原版: vel 15/19/25 随档位上升)
     p->jump_vel = JUMP_VEL_BASE + JUMP_VEL_STEP * speed_level;
 
+    if (p->rolling) {
+        p->roll_s -= dt;
+        if (p->roll_s <= 0) p->rolling = false;
+    }
     // 地面输入立即消费，不让本帧 dt 缩短刚按下的缓冲时间。
-    p->crouching = down_held && p->on_ground;
+    p->crouching = p->on_ground && (down_held || p->sliding || p->rolling);
     if (p->jump_buffer_s > 0 && player_jump(p)) {
         p->jump_buffer_s = 0;
         events = (player_event_t)(events | PLAYER_EVENT_JUMPED);
@@ -87,11 +162,22 @@ player_event_t player_update(player_t *p, float dt, bool up_held,
         if (buffered < 0) buffered = 0;
     }
 
+    if (p->double_jump_pending) {
+        p->double_jump_pending = false;
+        p->vel_y = p->jump_vel * 0.75f;
+        p->jump_count = 2;
+        p->air_time_s = 0;
+        events = (player_event_t)(events | PLAYER_EVENT_DOUBLE_JUMPED);
+    }
+
     // 竖直运动
     if (!p->on_ground) {
+        p->air_time_s += dt;
         float g = GRAVITY;
         if (up_held && p->vel_y > 0) g *= GRAVITY_BOOST;  // 按住跳更高
         if (down_held) g *= FAST_FALL_MULT;               // 空中速降
+        if (p->gliding && p->air_time_s <= GLIDE_MAX_S) g *= 0.45f;
+        if (p->stomping) g *= 1.8f;
         p->vel_y -= g * dt;
         p->y -= p->vel_y * dt; // 屏幕 y 向下为正, vel_y 向上为正
         // 限制最高跳跃位置，避免高速度档把恐龙顶到屏幕外。
@@ -103,12 +189,18 @@ player_event_t player_update(player_t *p, float dt, bool up_held,
             p->y = (float)s_ground_y;
             p->vel_y = 0;
             p->on_ground = true;
+            p->jump_count = 0;
+            p->air_time_s = 0;
+            p->gliding = false;
             events = (player_event_t)(events | PLAYER_EVENT_LANDED);
+            if (p->stomping)
+                events = (player_event_t)(events | PLAYER_EVENT_STOMP_LANDED);
+            p->stomping = false;
         }
     }
 
     // 落地后再刷新下蹲状态，然后消费仍有效的预输入。
-    p->crouching = down_held && p->on_ground;
+    p->crouching = p->on_ground && (down_held || p->sliding || p->rolling);
     p->jump_buffer_s = buffered;
     if (p->jump_buffer_s > 0 && player_jump(p)) {
         p->jump_buffer_s = 0;
@@ -121,8 +213,11 @@ player_event_t player_update(player_t *p, float dt, bool up_held,
     p->anim_timer += dt;
     if (p->anim_timer >= interval) {
         p->anim_timer = 0;
-        int n = p->crouching ? DOWN_FRAME_COUNT : FRAME_COUNT;
+        int n = p->rolling ? ROLL_FRAME_COUNT : p->sliding ? SLIDE_FRAME_COUNT
+                : p->gliding ? GLIDE_FRAME_COUNT
+                : p->crouching ? DOWN_FRAME_COUNT : FRAME_COUNT;
         p->anim_frame = (p->anim_frame + 1) % n;
+        p->action_frame = p->anim_frame;
     }
     return events;
 }
@@ -131,6 +226,12 @@ const sprite_t *player_sprite(const player_t *p)
 {
     if (p->dead)
         return p->crouching ? &spr_dino_dead_down : &spr_dino_dead;
+    if (p->rolling)
+        return ROLL_FRAMES[p->action_frame % ROLL_FRAME_COUNT];
+    if (p->sliding)
+        return SLIDE_FRAMES[p->action_frame % SLIDE_FRAME_COUNT];
+    if (p->gliding)
+        return GLIDE_FRAMES[p->action_frame % GLIDE_FRAME_COUNT];
     if (p->crouching)
         return DOWN_FRAMES[p->anim_frame % DOWN_FRAME_COUNT];
     if (!p->on_ground)
@@ -142,8 +243,8 @@ void player_draw_pos(const player_t *p, int *x, int *y)
 {
     const sprite_t *sp = player_sprite(p);
     // 锚点在精灵底部水平中心附近; 下蹲精灵更宽, 保持头部(右侧)位置不跳变
-    bool wide = p->crouching || (p->dead && p->crouching);
-    *x = (int)p->x - (wide ? 30 : 10);
+    bool wide = p->crouching || p->sliding || p->rolling || (p->dead && p->crouching);
+    *x = (int)p->x - (wide ? 21 : 10);
     *y = (int)p->y - sp->h;
 }
 
@@ -153,6 +254,16 @@ void player_hitbox(const player_t *p, int *x, int *y, int *w, int *h)
     int dx, dy;
     player_draw_pos(p, &dx, &dy);
     // 碰撞盒向内收 ~30%, 宽容贴图边缘的透明与阴影像素(贴近原版手感)
+    if (p->sliding) {
+        *x = (int)p->x - 21; *y = (int)p->y - 18;
+        *w = 42; *h = 18;
+        return;
+    }
+    if (p->rolling) {
+        *x = (int)p->x - 21; *y = (int)p->y - 20;
+        *w = 42; *h = 20;
+        return;
+    }
     int inset_x = sp->w * 3 / 10;
     int inset_top = sp->h / 8;
     int inset_bottom = 2;

@@ -9,6 +9,7 @@
 #define GAP_BASE_MIN   200.0f
 #define GAP_PER_SPEED   60.0f  // 每档速度增加的最小间距
 #define GAP_RANDOM     220.0f
+#define SAFE_GAP_CHANCE 10
 #define OBSTACLE_SPAWN_X (RENDER_SCREEN_W + 80) // 300px/s 时约 1.2s 可见提前量
 // 翼龙出现的分数门槛(对齐 Chrome 原版 ~450 分出现)
 // 不再要求速度档: 之前 PTERO_MIN_LEVEL=1 + 每 100 分只提速 4px/s,
@@ -74,6 +75,39 @@ static const sprite_t *scene_ground_sprite(scene_id_t scene, int variant)
     }
 }
 
+static int ground_size_slot(scene_id_t scene, int variant)
+{
+    return scene == SCENE_DESERT ? (variant % 6) % 3 : variant % 3;
+}
+
+static int ground_target_height(scene_id_t scene, int variant)
+{
+    int slot = ground_size_slot(scene, variant);
+    return slot == 0 ? 24 : slot == 1 ? 40 : 56;
+}
+
+static void ground_scaled_size(const sprite_t *sp, scene_id_t scene, int variant,
+                               int *w, int *h)
+{
+    *h = ground_target_height(scene, variant);
+    *w = sp->w * *h / sp->h;
+    if (*w < 1) *w = 1;
+}
+
+static bool ground_is_destructible(scene_id_t scene, int variant)
+{
+    if (scene == SCENE_CANYON) return false;
+    return ground_size_slot(scene, variant) == 0;
+}
+
+static int cactus_variant_for_size(scene_id_t scene, int size_slot)
+{
+    size_slot = size_slot < 0 ? 0 : size_slot > 2 ? 2 : size_slot;
+    if (scene == SCENE_DESERT)
+        return (rand() % 2) * 3 + size_slot;
+    return size_slot;
+}
+
 static obstacle_t *alloc_obstacle(void)
 {
     for (int i = 0; i < OBSTACLE_POOL; i++)
@@ -112,27 +146,45 @@ void obstacles_reset(void)
     s_heart_next = HEART_MILESTONE;
 }
 
-static void spawn_cactus(int speed_level)
+static float spawn_cactus(int speed_level)
 {
     int count = 1;
     if (rand() % 100 < TAIL_CHANCE) {
         // 低速档最多 2 连(保证起跳距离内可过), 高速档才出现 3 连
         count = speed_level == 0 ? 2 : 2 + rand() % 2;
     }
+
+    int sizes[3];
+    sizes[0] = count == 1 ? 1 + rand() % 2 : rand() % 3;
+    bool has_large_companion = sizes[0] > 0;
+    for (int i = 1; i < count; i++) {
+        sizes[i] = rand() % 3;
+        if (sizes[i] > 0) has_large_companion = true;
+    }
+    // 小障碍只能作为组合的一部分，且必须配合同类型的中号或大号障碍。
+    if (!has_large_companion)
+        sizes[count - 1] = 1 + rand() % 2;
+
     int base_x = OBSTACLE_SPAWN_X;
+    float group_width = 0;
     for (int i = 0; i < count; i++) {
         obstacle_t *o = alloc_obstacle();
-        if (!o) return;
+        if (!o) return group_width;
         o->type = OBS_CACTUS;
-        o->variant = rand() % 6;
+        o->variant = cactus_variant_for_size(s_scene_current, sizes[i]);
         o->spr = scene_ground_sprite(s_scene_current, o->variant);
         o->x = (float)base_x;
         o->y = (float)s_ground_y;
         o->anim_timer = 0;
         o->anim_frame = 0;
+        o->destructible = ground_is_destructible(s_scene_current, o->variant);
         o->active = true;
-        base_x += o->spr->w - 4; // 稍微叠一点, 像原版成簇仙人掌
+        int draw_w, draw_h;
+        ground_scaled_size(o->spr, s_scene_current, o->variant, &draw_w, &draw_h);
+        group_width += draw_w - 4;
+        base_x += draw_w - 4; // 按实际尺寸轻微叠放，避免缩放后产生空洞
     }
+    return group_width;
 }
 
 static void spawn_ptero(void)
@@ -146,12 +198,14 @@ static void spawn_ptero(void)
     o->ptero_frames[2]=&spr_ptero_2; o->ptero_frames[3]=&spr_ptero_3;
     o->ptero_frames[4]=&spr_ptero_4; o->ptero_frames[5]=&spr_ptero_5;
     o->x = (float)OBSTACLE_SPAWN_X;
-    int h = rand() % 4;
+    // 头顶翼龙约占飞行障碍的 2/3，对应总生成权重约 20%。
+    int h = (rand() % 3 == 0) ? (rand() % 3 == 0 ? 0 : 1 + rand() % 2) : 2;
     int lift = h == 0 ? PTERO_H_LOW : h == 1 ? PTERO_H_MID
               : h == 2 ? PTERO_H_HEAD : PTERO_H_HIGH;
     o->y = (float)(s_ground_y - lift);
     o->anim_timer = 0;
     o->anim_frame = 0;
+    o->destructible = false;
     o->active = true;
 }
 
@@ -197,8 +251,9 @@ void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level,
     s_since_spawn += speed_px * dt;
     if (s_since_spawn >= s_next_gap) {
         s_since_spawn = 0;
-        s_next_gap = GAP_BASE_MIN + GAP_PER_SPEED * speed_level
-                     + (float)(rand() % (int)GAP_RANDOM);
+        float base_gap = GAP_BASE_MIN + GAP_PER_SPEED * speed_level
+                       + (float)(rand() % (int)GAP_RANDOM);
+        s_next_gap = base_gap;
         // 红心: 里程碑保底 + 低概率随机, 满心不出
         bool heart_due = score >= s_heart_next;
         if (heart_due) s_heart_next = ((score / HEART_MILESTONE) + 1) * HEART_MILESTONE;
@@ -206,10 +261,16 @@ void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level,
             spawn_heart();
             return;
         }
+        if (rand() % 100 < SAFE_GAP_CHANCE) return;
         bool want_ptero = speed_level >= PTERO_MIN_LEVEL && score >= PTERO_MIN_SCORE
-                          && rand() % 100 < 35;
-        if (want_ptero) spawn_ptero();
-        else spawn_cactus(speed_level);
+                          && rand() % 100 < 30;
+        if (want_ptero) {
+            spawn_ptero();
+        } else {
+            // s_since_spawn 从首个障碍开始计量，因此要把本波宽度加回去，
+            // 保持波与波之间的可通过间距不因尺寸组合而缩短。
+            s_next_gap = base_gap + spawn_cactus(speed_level);
+        }
     }
 }
 
@@ -226,11 +287,14 @@ void obstacles_draw(void)
         }
         const sprite_t *sp = o->type == OBS_PTERO ? o->ptero_frames[o->anim_frame % 6]
                                                   : scene_ground_sprite(s_scene_current, o->variant);
-        int sx = (int)o->x - sp->w / 2;
-        int sy = (int)o->y - sp->h;
+        int draw_w = sp->w, draw_h = sp->h;
+        if (o->type == OBS_CACTUS)
+            ground_scaled_size(sp, s_scene_current, o->variant, &draw_w, &draw_h);
+        int sx = (int)o->x - draw_w / 2;
+        int sy = (int)o->y - draw_h;
         // 椭圆阴影(伪 3D 关键线索, 对齐原版的 blob shadow); 红心贴地/悬浮不画
         if (o->type != OBS_HEART) {
-            int sh_w = sp->w * 4 / 5;
+            int sh_w = draw_w * 4 / 5;
             int sh_y = (o->type == OBS_PTERO) ? s_ground_y + 1 : (int)o->y + 1;
             render_set_opacity(s_shadow_opacity);
             render_fill_rect((int)o->x - sh_w / 2, sh_y, sh_w, 3, RGB565(120, 95, 45));
@@ -239,12 +303,23 @@ void obstacles_draw(void)
         if (o->type == OBS_CACTUS && s_scene_mix > 0 && s_scene_next != s_scene_current) {
             const sprite_t *next = scene_ground_sprite(s_scene_next, o->variant);
             render_set_opacity((uint8_t)(255 - s_scene_mix));
-            render_sprite(sp, (int)o->x - sp->w / 2, (int)o->y - sp->h);
+            if (o->type == OBS_CACTUS)
+                render_sprite_scaled(sp, (int)o->x - draw_w / 2,
+                                     (int)o->y - draw_h, draw_w, draw_h,
+                                     (uint8_t)(255 - s_scene_mix));
+            else
+                render_sprite(sp, sx, sy);
             render_set_opacity(s_scene_mix);
-            render_sprite(next, (int)o->x - next->w / 2, (int)o->y - next->h);
+            int nw = next->w, nh = next->h;
+            ground_scaled_size(next, s_scene_next, o->variant, &nw, &nh);
+            render_sprite_scaled(next, (int)o->x - nw / 2,
+                                 (int)o->y - nh, nw, nh, s_scene_mix);
             render_set_opacity(255);
         } else {
-            render_sprite(sp, sx, sy);
+            if (o->type == OBS_CACTUS)
+                render_sprite_scaled(sp, sx, sy, draw_w, draw_h, 255);
+            else
+                render_sprite(sp, sx, sy);
         }
     }
 }
@@ -263,11 +338,12 @@ static void obs_hitbox(const obstacle_t *o, int *x, int *y, int *w, int *h)
     *h = sp->h;
     // 仙人掌视觉上有盆/阴影, 向内收一点
     if (o->type == OBS_CACTUS) {
-        /* Scene skins have different silhouettes; keep one stable gameplay box. */
-        *x = (int)o->x - 13;
-        *y = (int)o->y - 50;
-        *w = 26;
-        *h = 46;
+        int sw, sh;
+        ground_scaled_size(sp, s_scene_current, o->variant, &sw, &sh);
+        *x = (int)o->x - sw / 2 + sw / 8;
+        *y = (int)o->y - sh + sh / 8;
+        *w = sw - sw / 4;
+        *h = sh - sh / 8 - 2;
     } else {
         *x += 11; *w -= 22; // 翼龙翅膀不算碰撞, 头部高度档再收窄一点
         *y += 7; *h -= 14;
@@ -308,4 +384,17 @@ void obstacles_visual_center(int idx, int *x, int *y)
 void obstacles_remove(int idx)
 {
     if (idx >= 0 && idx < OBSTACLE_POOL) s_pool[idx].active = false;
+}
+
+bool obstacles_is_destructible(int idx)
+{
+    return idx >= 0 && idx < OBSTACLE_POOL && s_pool[idx].active &&
+           s_pool[idx].type == OBS_CACTUS && s_pool[idx].destructible;
+}
+
+bool obstacles_stomp(int idx)
+{
+    if (!obstacles_is_destructible(idx)) return false;
+    s_pool[idx].active = false;
+    return true;
 }

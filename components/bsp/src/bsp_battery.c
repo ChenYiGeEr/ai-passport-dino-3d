@@ -4,6 +4,7 @@
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdbool.h>
@@ -179,6 +180,19 @@ esp_err_t bsp_battery_init(void) {
         goto fail;
     }
 
+#if BSP_BATTERY_CHARGE_GPIO >= 0
+    gpio_config_t charge_gpio = {
+        .pin_bit_mask = 1ULL << BSP_BATTERY_CHARGE_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&charge_gpio) != ESP_OK) {
+        ESP_LOGW(TAG, "充电检测 GPIO%d 初始化失败", BSP_BATTERY_CHARGE_GPIO);
+    }
+#endif
+
     return ESP_OK;
 
 fail:
@@ -200,4 +214,13 @@ int bsp_battery_mv(void) {
     if (cw_read(CW_REG_VCELL_H, b, 2) != 0) return -1;
     uint32_t raw = ((uint32_t)b[0] << 8 | b[1]) & 0x3FFF;   // 14bit
     return (int)((raw * 3125) / 10000);                     // raw * 312.5uV → mV
+}
+
+bool bsp_battery_charging(void)
+{
+#if BSP_BATTERY_CHARGE_GPIO >= 0
+    return gpio_get_level(BSP_BATTERY_CHARGE_GPIO) == BSP_BATTERY_CHARGE_ACTIVE_LEVEL;
+#else
+    return false;
+#endif
 }
