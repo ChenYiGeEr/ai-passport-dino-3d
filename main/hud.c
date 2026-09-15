@@ -219,6 +219,19 @@ void hud_draw_battery(int soc, bool charging, uint16_t color)
     }
 }
 
+void hud_draw_shield(int x, int y, uint16_t color)
+{
+    int cx = x + 10;
+    render_fill_rect(cx - 7, y, 14, 2, color);
+    render_fill_rect(cx - 9, y + 2, 2, 10, color);
+    render_fill_rect(cx + 7, y + 2, 2, 10, color);
+    render_fill_rect(cx - 6, y + 12, 2, 5, color);
+    render_fill_rect(cx + 4, y + 12, 2, 5, color);
+    render_fill_rect(cx - 3, y + 17, 6, 2, color);
+    render_fill_rect(cx - 1, y + 5, 2, 9, RGB565(80, 210, 255));
+    render_fill_rect(cx - 4, y + 8, 8, 2, RGB565(80, 210, 255));
+}
+
 void hud_draw_game_over(uint16_t color)
 {
     // 3 倍大字号 + 黑色阴影, 居中显示在屏幕上半部

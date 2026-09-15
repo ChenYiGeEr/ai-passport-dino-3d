@@ -1,5 +1,6 @@
 #include "scene.h"
 #include "render.h"
+#include "esp_log.h"
 #include <stdlib.h>
 #include <math.h>
 
@@ -56,6 +57,7 @@ void scene_manager_reset(scene_manager_t *m) {
 void scene_manager_begin(scene_manager_t *m, scene_id_t next) {
     if (m->transitioning || next == m->current) return;
     m->next = next; m->transition_s = 0; m->transitioning = true;
+    ESP_LOGI("scene", "scene transition begin: %d -> %d", (int)m->current, (int)next);
 }
 
 void scene_manager_update(scene_manager_t *m, float dt, bool deepest_night, bool blocked) {
@@ -63,8 +65,10 @@ void scene_manager_update(scene_manager_t *m, float dt, bool deepest_night, bool
     if (m->transitioning) {
         if (!blocked && dt > 0) m->transition_s += dt;
         if (m->transition_s >= SCENE_TRANSITION_S) {
+            scene_id_t prev = m->current;
             m->current = m->next; m->transitioning = false;
             m->transition_s = 0; m->bag_mask |= 1u << m->current;
+            ESP_LOGI("scene", "scene switched: %d -> %d", (int)prev, (int)m->current);
         }
         return;
     }

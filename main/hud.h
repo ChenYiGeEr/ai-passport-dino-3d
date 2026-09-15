@@ -12,6 +12,8 @@ void hud_draw_scores(uint32_t score, uint32_t hi_score, bool blink_on, uint16_t 
 // 右上角电池状态；soc<0 时固定显示 --%，charging=true 时叠加闪电符号。
 void hud_draw_battery(int soc, bool charging, uint16_t color);
 
+void hud_draw_shield(int x, int y, uint16_t color);
+
 // 屏幕中央绘制 "GAME OVER"。
 void hud_draw_game_over(uint16_t color);
 

@@ -123,6 +123,7 @@ static float s_game_time_s;
 static uint32_t s_last_flash; // 已提示到的整百
 static float s_flash_until;   // 游戏时间秒；暂停时冻结
 static int s_lives;           // 剩余红心
+static bool s_has_shield;      // 当前是否持有护盾
 static float s_invincible_until; // 游戏时间秒；暂停时冻结
 static idle_sleep_t s_idle_sleep;
 static scene_manager_t s_scene;
@@ -229,16 +230,33 @@ static void draw_gradient_band(int y0, int y1, uint16_t from, uint16_t to)
     }
 }
 
+static void draw_mid_gradient(uint16_t sky, uint16_t near_color)
+{
+    const int y0 = SKY_MID_Y;
+    const int y1 = FIELD_Y;
+    const int step = 4;
+    const int span = y1 - y0;
+    for (int y = y0; y < y1; y += step) {
+        int end = y + step;
+        if (end > y1) end = y1;
+        int mid = y + (end - y) / 2;
+        uint8_t mix = (uint8_t)(((mid - y0) * 255) / span);
+        render_fill_rect(0, y, RENDER_SCREEN_W, end - y,
+                         color_blend565(sky, near_color, mix));
+    }
+}
+
 static void draw_background_layers(uint16_t sky, uint16_t mid,
                                    uint16_t horizon, uint16_t ground)
 {
     (void)horizon;
-    // MID 每个场景只使用一套颜色；只在 SKY/MID 和 MID/NEAR
-    // 交界保留窄渐变，避免出现同一中景被 horizon 色带割成两块。
-    render_fill_rect(0, SKY_MID_Y, RENDER_SCREEN_W, FIELD_Y - SKY_MID_Y, mid);
-    draw_gradient_band(SKY_MID_Y - 24, SKY_MID_Y, sky, mid);
-    draw_gradient_band(FIELD_Y - 4, FIELD_Y, mid, ground);
+    // MID 从 SKY 到 NEAR/GROUND 覆盖整个区域做纵向渐变。
+    // mid 参数保留用于调用兼容，实际渐变端点由当前场景调色板提供。
+    (void)mid;
     render_fill_rect(0, FIELD_Y, RENDER_SCREEN_W, GROUND_Y - FIELD_Y, ground);
+    draw_mid_gradient(sky, ground);
+    draw_gradient_band(SKY_MID_Y - 24, SKY_MID_Y, sky, sky);
+    draw_gradient_band(FIELD_Y - 4, FIELD_Y, ground, ground);
 }
 
 static void draw_depth_guides(void)
@@ -482,6 +500,7 @@ static void game_reset(void)
     s_last_flash = 0;
     s_flash_until = 0;
     s_lives = MAX_LIVES;
+    s_has_shield = false;
     s_invincible_until = 0;
     s_heart_pickup_fx.active = false;
     s_hud_heart_pop_active = false;
@@ -593,6 +612,8 @@ static void draw_lives(void)
         render_sprite_scaled_raw(&spr_heart, cx - w / 2, cy - h / 2 - lift,
                                  w, h, 255);
     }
+    if (s_has_shield)
+        hud_draw_shield(6 + s_lives * 15, 6, RGB565(235, 235, 255));
 }
 
 static void draw_frame(int refresh_start_y)
@@ -782,6 +803,7 @@ void game_run(void)
         bool down_held = held == KEY_DOWN;
         game_state_t state_before = s_state;
         int lives_before = s_lives;
+        bool shield_before = s_has_shield;
         bool transition_was_active = s_settings_fade.active;
         bool transition_redraw = settings_fade_update(frame_start);
         bool heart_effect_redraw = false;
@@ -888,8 +910,11 @@ void game_run(void)
                 bool was_night = s_want_night;
                 s_cycle_segment_start = s_score;
                 s_want_night = !s_want_night;
-                if (was_night && !s_want_night)
+                if (was_night && !s_want_night) {
                     s_scene_switch_pending = true;
+                    ESP_LOGI(TAG, "scene switch pending: current=%d score=%d",
+                             (int)scene_manager_current(&s_scene), (int)s_score);
+                }
             }
             sky_elapsed_s += dt;
             if (scene_manager_transitioning(&s_scene)) {
@@ -921,7 +946,8 @@ void game_run(void)
                 if (events & PLAYER_EVENT_JUMPED)
                     sfx_play(SFX_JUMP);
             }
-            obstacles_update(dt, s_speed, (uint32_t)s_score, speed_level(), s_lives);
+            obstacles_update(dt, s_speed, (uint32_t)s_score, speed_level(), s_lives,
+                              s_has_shield);
             scenery_update(dt, s_speed);
             sky_scroll_px += s_speed * dt;
             dust_update(dt);
@@ -932,7 +958,10 @@ void game_run(void)
                 player_hitbox(&s_player, &hx, &hy, &hw, &hh);
                 int hit = obstacles_collide(hx, hy, hw, hh);
                 if (hit >= 0) {
-                    if (obstacles_type(hit) == OBS_HEART) {
+                    if (obstacles_type(hit) == OBS_SHIELD) {
+                        obstacles_remove(hit);
+                        s_has_shield = true;
+                    } else if (obstacles_type(hit) == OBS_HEART) {
                         int heart_x, heart_y;
                         obstacles_visual_center(hit, &heart_x, &heart_y);
                         obstacles_remove(hit);
@@ -949,6 +978,10 @@ void game_run(void)
                             s_hud_heart_pop_started_at = s_game_time_s;
                             sfx_play(SFX_HEART);
                         }
+                    } else if (s_has_shield) {
+                        s_has_shield = false;
+                        s_invincible_until = s_game_time_s + INVINCIBLE_MS / 1000.0f;
+                        sfx_play(SFX_DEATH);
                     } else if (player_is_stomping(&s_player) &&
                                obstacles_is_destructible(hit)) {
                         int fx, fy;
@@ -1049,6 +1082,7 @@ void game_run(void)
         bool input_activity = press != KEY_NONE || click != KEY_NONE ||
                               long_press != KEY_NONE;
         bool force_full_refresh = state_changed || s_lives != lives_before ||
+                                  s_has_shield != shield_before ||
                                   transition_redraw || s_hud_heart_pop_active ||
                                   heart_effect_redraw || battery_redraw;
 

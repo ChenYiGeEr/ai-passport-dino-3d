@@ -38,6 +38,7 @@ static const sprite_t *GLIDE_FRAMES[] = { &spr_dino_glide_0, &spr_dino_glide_1 }
 #define ROLL_FRAME_COUNT 4
 #define GLIDE_FRAME_COUNT 2
 #define DOUBLE_JUMP_WINDOW_S 0.650f
+#define DOUBLE_JUMP_HEIGHT_SCALE 1.095445f // sqrt(1.2): 最高点提高约 20%
 #define GLIDE_MAX_S 0.700f
 #define ROLL_DURATION_S 0.300f
 
@@ -164,7 +165,7 @@ player_event_t player_update(player_t *p, float dt, bool up_held,
 
     if (p->double_jump_pending) {
         p->double_jump_pending = false;
-        p->vel_y = p->jump_vel * 0.75f;
+        p->vel_y = p->jump_vel * 0.75f * DOUBLE_JUMP_HEIGHT_SCALE;
         p->jump_count = 2;
         p->air_time_s = 0;
         events = (player_event_t)(events | PLAYER_EVENT_DOUBLE_JUMPED);

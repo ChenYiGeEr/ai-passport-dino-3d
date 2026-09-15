@@ -14,8 +14,10 @@
 #define OBS_HEART_BASE_H 20
 #define OBS_HEART_MAX_W  24
 #define OBS_HEART_MAX_H  22
+#define OBS_SHIELD_BASE_W 22
+#define OBS_SHIELD_BASE_H 24
 
-typedef enum { OBS_CACTUS, OBS_PTERO, OBS_HEART } obs_type_t;
+typedef enum { OBS_CACTUS, OBS_PTERO, OBS_HEART, OBS_SHIELD } obs_type_t;
 
 typedef struct {
     bool active;
@@ -37,7 +39,8 @@ void obstacles_set_shadow_opacity(uint8_t opacity);
 
 // 每帧更新:滚动、生成、动画、回收。speed_px 为当前地面速度(px/s)。
 // lives 用于红心生成门槛(满心不出红心)。
-void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level, int lives);
+void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level, int lives,
+                       bool has_shield);
 
 // 把所有活动障碍提交给渲染器。
 void obstacles_draw(void);

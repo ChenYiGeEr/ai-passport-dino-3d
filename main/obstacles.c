@@ -36,6 +36,7 @@ static int s_ground_y;
 static float s_next_gap;      // 距下一个障碍还需滚动的距离
 static float s_since_spawn;   // 上次生成后已滚动的距离
 static uint32_t s_heart_next; // 下一个保底红心的分数门槛
+static uint32_t s_shield_next; // 下一个保底护盾的分数门槛
 static scene_id_t s_scene_current = SCENE_DESERT;
 static scene_id_t s_scene_next = SCENE_DESERT;
 static uint8_t s_scene_mix;
@@ -143,6 +144,7 @@ void obstacles_reset(void)
     s_since_spawn = 0;
     s_next_gap = 300; // 开局缓冲, 别一出生就撞
     s_heart_next = HEART_MILESTONE;
+    s_shield_next = HEART_MILESTONE;
 }
 
 static float spawn_cactus(int speed_level)
@@ -207,6 +209,47 @@ static void spawn_ptero(void)
     o->active = true;
 }
 
+static void shield_geometry(const obstacle_t *o, int *x, int *y, int *w, int *h)
+{
+    static const int8_t BOB_Y[10] = { 0, -1, -2, -2, -1, 0, 1, 2, 2, 1 };
+    int elapsed_ms = (int)(o->anim_timer * 1000.0f);
+    int bob_frame = (elapsed_ms % HEART_FLOAT_MS) * 10 / HEART_FLOAT_MS;
+    *w = OBS_SHIELD_BASE_W;
+    *h = OBS_SHIELD_BASE_H;
+    *x = (int)o->x - *w / 2;
+    *y = (int)o->y - *h / 2 + BOB_Y[bob_frame];
+}
+
+static void draw_shield_icon(int x, int y, int w, int h, uint16_t color)
+{
+    int cx = x + w / 2;
+    render_fill_rect(cx - 7, y, 14, 2, color);
+    render_fill_rect(cx - 9, y + 2, 2, h / 2, color);
+    render_fill_rect(cx + 7, y + 2, 2, h / 2, color);
+    render_fill_rect(cx - 7, y + h / 2 - 2, 2, 6, color);
+    render_fill_rect(cx + 5, y + h / 2 - 2, 2, 6, color);
+    render_fill_rect(cx - 5, y + h - 8, 2, 4, color);
+    render_fill_rect(cx + 3, y + h - 8, 2, 4, color);
+    render_fill_rect(cx - 3, y + h - 4, 6, 2, color);
+    render_fill_rect(cx - 1, y + 6, 2, 10, RGB565(80, 210, 255));
+    render_fill_rect(cx - 5, y + 10, 10, 2, RGB565(80, 210, 255));
+}
+static void spawn_shield(void)
+{
+    obstacle_t *o = alloc_obstacle();
+    if (!o) return;
+    o->type = OBS_SHIELD;
+    o->spr = NULL;
+    o->spr2 = NULL;
+    o->x = (float)OBSTACLE_SPAWN_X;
+    int lift = (rand() % 100 < HEART_LOW_RATIO) ? 8 : 45;
+    o->y = (float)(s_ground_y - lift);
+    o->anim_timer = 0;
+    o->anim_frame = 0;
+    o->destructible = false;
+    o->active = true;
+}
+
 static void spawn_heart(void)
 {
     obstacle_t *o = alloc_obstacle();
@@ -215,7 +258,6 @@ static void spawn_heart(void)
     o->spr = &spr_heart;
     o->spr2 = NULL;
     o->x = (float)OBSTACLE_SPAWN_X;
-    // 70% 贴地(离地 8px), 30% 低空(离地 45px, 需起跳)
     int lift = (rand() % 100 < HEART_LOW_RATIO) ? 8 : 45;
     o->y = (float)(s_ground_y - lift);
     o->anim_timer = 0;
@@ -223,7 +265,8 @@ static void spawn_heart(void)
     o->active = true;
 }
 
-void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level, int lives)
+void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level, int lives,
+                       bool has_shield)
 {
     // 滚动与扑翼
     for (int i = 0; i < OBSTACLE_POOL; i++) {
@@ -236,12 +279,13 @@ void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level,
                 o->anim_timer -= 0.07f;
                 o->anim_frame = (o->anim_frame + 1) % 6;
             }
-        } else if (o->type == OBS_HEART) {
+        } else if (o->type == OBS_HEART || o->type == OBS_SHIELD) {
             o->anim_timer += dt;
             if (o->anim_timer >= HEART_WRAP_MS / 1000.0f)
                 o->anim_timer -= HEART_WRAP_MS / 1000.0f;
         }
-        int w = o->type == OBS_HEART ? OBS_HEART_MAX_W : o->spr->w;
+        int w = o->type == OBS_HEART ? OBS_HEART_MAX_W
+              : o->type == OBS_SHIELD ? OBS_SHIELD_BASE_W : o->spr->w;
         if (o->x + w < -20) o->active = false;
     }
 
@@ -252,9 +296,15 @@ void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level,
         float base_gap = GAP_BASE_MIN + GAP_PER_SPEED * speed_level
                        + (float)(rand() % (int)GAP_RANDOM);
         s_next_gap = base_gap;
-        // 红心: 里程碑保底 + 低概率随机, 满心不出
+        // 红心与护盾分别维护保底门槛；已有护盾时护盾保底不消耗。
         bool heart_due = score >= s_heart_next;
+        bool shield_due = !has_shield && score >= s_shield_next;
         if (heart_due) s_heart_next = ((score / HEART_MILESTONE) + 1) * HEART_MILESTONE;
+        if (!has_shield && (shield_due || rand() % 100 < HEART_CHANCE)) {
+            if (shield_due) s_shield_next = ((score / HEART_MILESTONE) + 1) * HEART_MILESTONE;
+            spawn_shield();
+            return;
+        }
         if (lives < 3 && (heart_due || rand() % 100 < HEART_CHANCE)) {
             spawn_heart();
             return;
@@ -277,6 +327,12 @@ void obstacles_draw(void)
     for (int i = 0; i < OBSTACLE_POOL; i++) {
         obstacle_t *o = &s_pool[i];
         if (!o->active) continue;
+        if (o->type == OBS_SHIELD) {
+            int sx, sy, sw, sh;
+            shield_geometry(o, &sx, &sy, &sw, &sh);
+            draw_shield_icon(sx, sy, sw, sh, RGB565(235, 235, 255));
+            continue;
+        }
         if (o->type == OBS_HEART) {
             int sx, sy, sw, sh;
             heart_geometry(o, &sx, &sy, &sw, &sh);
@@ -324,6 +380,10 @@ void obstacles_draw(void)
 
 static void obs_hitbox(const obstacle_t *o, int *x, int *y, int *w, int *h)
 {
+    if (o->type == OBS_SHIELD) {
+        shield_geometry(o, x, y, w, h);
+        return;
+    }
     if (o->type == OBS_HEART) {
         heart_geometry(o, x, y, w, h);
         return;
@@ -334,7 +394,6 @@ static void obs_hitbox(const obstacle_t *o, int *x, int *y, int *w, int *h)
     *y = (int)o->y - sp->h;
     *w = sp->w;
     *h = sp->h;
-    // 仙人掌视觉上有盆/阴影, 向内收一点
     if (o->type == OBS_CACTUS) {
         int sw, sh;
         ground_scaled_size(sp, s_scene_current, o->variant, &sw, &sh);
@@ -343,7 +402,7 @@ static void obs_hitbox(const obstacle_t *o, int *x, int *y, int *w, int *h)
         *w = sw - sw / 4;
         *h = sh - sh / 8 - 2;
     } else {
-        *x += 11; *w -= 22; // 翼龙翅膀不算碰撞, 头部高度档再收窄一点
+        *x += 11; *w -= 22;
         *y += 7; *h -= 14;
     }
 }
