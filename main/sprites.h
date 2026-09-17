@@ -119,3 +119,4 @@ extern const sprite_t spr_tumbleweed_5;
 extern const sprite_t spr_tumbleweed_6;
 extern const sprite_t spr_tumbleweed_7;
 extern const sprite_t spr_heart;
+extern const sprite_t spr_shield;

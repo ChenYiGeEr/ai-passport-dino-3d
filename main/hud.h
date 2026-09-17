@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "obstacles.h"
 
 // 在右上角绘制 "HI 00123 00456"。blink=true 时当前分数闪烁(用于破纪录提示)。
 void hud_draw_scores(uint32_t score, uint32_t hi_score, bool blink_on, uint16_t color);
@@ -13,6 +14,7 @@ void hud_draw_scores(uint32_t score, uint32_t hi_score, bool blink_on, uint16_t 
 void hud_draw_battery(int soc, bool charging, uint16_t color);
 
 void hud_draw_shield(int x, int y, uint16_t color);
+void hud_draw_shield_scaled(int x, int y, int w, int h, uint16_t color);
 
 // 屏幕中央绘制 "GAME OVER"。
 void hud_draw_game_over(uint16_t color);

@@ -19,7 +19,7 @@
 // 翼龙三种高度(相对地面线的抬升, K=2 精灵尺寸)
 #define PTERO_H_LOW     8
 #define PTERO_H_MID    20
-#define PTERO_H_HIGH   35
+#define PTERO_H_HIGH   30
 // 仙人掌成组("尾巴")概率, 原版 chance_to_spawn_tail = [100, 25]
 #define TAIL_CHANCE     25
 // 红心生成: 每 1000 分保底一颗 + 每次生成障碍 2% 概率; 满心不出
@@ -211,35 +211,27 @@ static void spawn_ptero(void)
 
 static void shield_geometry(const obstacle_t *o, int *x, int *y, int *w, int *h)
 {
+    // 护盾完全复用红心的几何时序：脉动尺寸 + 上下浮动。
+    static const int8_t PULSE_EXTRA[8] = { 0, 1, 1, 2, 2, 1, 1, 0 };
     static const int8_t BOB_Y[10] = { 0, -1, -2, -2, -1, 0, 1, 2, 2, 1 };
     int elapsed_ms = (int)(o->anim_timer * 1000.0f);
+    int pulse_frame = (elapsed_ms % HEART_PULSE_MS) * 8 / HEART_PULSE_MS;
     int bob_frame = (elapsed_ms % HEART_FLOAT_MS) * 10 / HEART_FLOAT_MS;
-    *w = OBS_SHIELD_BASE_W;
-    *h = OBS_SHIELD_BASE_H;
-    *x = (int)o->x - *w / 2;
-    *y = (int)o->y - *h / 2 + BOB_Y[bob_frame];
-}
+    int extra = PULSE_EXTRA[pulse_frame];
+    int center_x = (int)o->x;
+    int center_y = (int)o->y - OBS_HEART_BASE_H / 2 + BOB_Y[bob_frame];
 
-static void draw_shield_icon(int x, int y, int w, int h, uint16_t color)
-{
-    int cx = x + w / 2;
-    render_fill_rect(cx - 7, y, 14, 2, color);
-    render_fill_rect(cx - 9, y + 2, 2, h / 2, color);
-    render_fill_rect(cx + 7, y + 2, 2, h / 2, color);
-    render_fill_rect(cx - 7, y + h / 2 - 2, 2, 6, color);
-    render_fill_rect(cx + 5, y + h / 2 - 2, 2, 6, color);
-    render_fill_rect(cx - 5, y + h - 8, 2, 4, color);
-    render_fill_rect(cx + 3, y + h - 8, 2, 4, color);
-    render_fill_rect(cx - 3, y + h - 4, 6, 2, color);
-    render_fill_rect(cx - 1, y + 6, 2, 10, RGB565(80, 210, 255));
-    render_fill_rect(cx - 5, y + 10, 10, 2, RGB565(80, 210, 255));
+    *w = OBS_HEART_BASE_W + extra;
+    *h = OBS_HEART_BASE_H + extra;
+    *x = center_x - *w / 2;
+    *y = center_y - *h / 2;
 }
 static void spawn_shield(void)
 {
     obstacle_t *o = alloc_obstacle();
     if (!o) return;
     o->type = OBS_SHIELD;
-    o->spr = NULL;
+    o->spr = &spr_shield;
     o->spr2 = NULL;
     o->x = (float)OBSTACLE_SPAWN_X;
     int lift = (rand() % 100 < HEART_LOW_RATIO) ? 8 : 45;
@@ -284,8 +276,7 @@ void obstacles_update(float dt, float speed_px, uint32_t score, int speed_level,
             if (o->anim_timer >= HEART_WRAP_MS / 1000.0f)
                 o->anim_timer -= HEART_WRAP_MS / 1000.0f;
         }
-        int w = o->type == OBS_HEART ? OBS_HEART_MAX_W
-              : o->type == OBS_SHIELD ? OBS_SHIELD_BASE_W : o->spr->w;
+        int w = o->type == OBS_HEART ? OBS_HEART_MAX_W : o->spr->w;
         if (o->x + w < -20) o->active = false;
     }
 
@@ -330,7 +321,7 @@ void obstacles_draw(void)
         if (o->type == OBS_SHIELD) {
             int sx, sy, sw, sh;
             shield_geometry(o, &sx, &sy, &sw, &sh);
-            draw_shield_icon(sx, sy, sw, sh, RGB565(235, 235, 255));
+            render_sprite_scaled(&spr_shield, sx, sy, sw, sh, 255);
             continue;
         }
         if (o->type == OBS_HEART) {
@@ -346,8 +337,8 @@ void obstacles_draw(void)
             ground_scaled_size(sp, s_scene_current, o->variant, &draw_w, &draw_h);
         int sx = (int)o->x - draw_w / 2;
         int sy = (int)o->y - draw_h;
-        // 椭圆阴影(伪 3D 关键线索, 对齐原版的 blob shadow); 红心贴地/悬浮不画
-        if (o->type != OBS_HEART) {
+        // 椭圆阴影(伪 3D 关键线索); 红心和护盾贴地/悬浮不画
+        if (o->type != OBS_HEART && o->type != OBS_SHIELD) {
             int sh_w = draw_w * 4 / 5;
             int sh_y = (o->type == OBS_PTERO) ? s_ground_y + 1 : (int)o->y + 1;
             render_set_opacity(s_shadow_opacity);

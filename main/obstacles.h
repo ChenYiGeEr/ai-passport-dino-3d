@@ -14,8 +14,6 @@
 #define OBS_HEART_BASE_H 20
 #define OBS_HEART_MAX_W  24
 #define OBS_HEART_MAX_H  22
-#define OBS_SHIELD_BASE_W 22
-#define OBS_SHIELD_BASE_H 24
 
 typedef enum { OBS_CACTUS, OBS_PTERO, OBS_HEART, OBS_SHIELD } obs_type_t;
 

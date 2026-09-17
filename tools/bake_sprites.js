@@ -424,6 +424,24 @@ function rgb565num(r, g, b) { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b 
         '....xXXx....',
         '.....xx.....',
     ];
+    // 22x20
+    const SHIELD = [
+        "........@@@@@@........",
+        "......@@@@@@@@@@@.....",
+        "....@@@@@@@@@@@@@@....",
+        "...@@@@@@@@@@@@@@@@...",
+        "....@@@@@@@@@@@@@@....",
+        ".....@@@@@@@@@@@@.....",
+        "......@@@@@@@@@@......",
+        ".......@@@@@@@@.......",
+        "........@@@@@@........",
+        ".........@@@@.........",
+        "..........@@.........."
+    ];
+    const SHIELD_COLORS = {
+        '@': rgb565num(10, 50, 180),   // 主体深蓝
+        '+': rgb565num(5, 30, 130),    // 边缘更深蓝
+    };
     const hh = HEART.length, ww = HEART[0].length;
     const hpx = new Uint16Array(ww * hh);
     HEART.forEach((row, y) => [...row].forEach((ch, x) => {
@@ -432,6 +450,17 @@ function rgb565num(r, g, b) { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b 
     }));
     models.push({ name: 'heart', w: ww, h: hh, px: hpx });
     console.log(`heart: ${ww}x${hh} (hand-drawn)`);
+
+    // ---- 盾牌 ----
+    const sww = SHIELD[0].length;
+    const shh = SHIELD.length;
+    const spx = new Uint16Array(sww * shh);
+    SHIELD.forEach((row, y) => [...row].forEach((ch, x) => {
+        if (ch === '@') spx[y * sww + x] = SHIELD_COLORS['@'];
+        else if (ch === '+') spx[y * sww + x] = SHIELD_COLORS['+'];
+    }));
+    models.push({ name: 'shield', w: sww, h: shh, px: spx });
+    console.log(`shield: ${sww}x${shh} (hand-drawn)`);
 }
 
 /* ---------------- 输出 C 代码 ---------------- */

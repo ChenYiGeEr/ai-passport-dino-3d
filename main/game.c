@@ -278,6 +278,8 @@ typedef struct {
     int x, y;
 } heart_pickup_fx_t;
 
+typedef heart_pickup_fx_t shield_fx_t;
+
 typedef struct {
     bool active;
     bool entering;
@@ -285,9 +287,12 @@ typedef struct {
 } settings_fade_t;
 
 static heart_pickup_fx_t s_heart_pickup_fx;
+static shield_fx_t s_shield_pickup_fx;
 static bool s_hud_heart_pop_active;
 static float s_hud_heart_pop_started_at;
 static int s_hud_heart_pop_index;
+static bool s_hud_shield_pop_active;
+static float s_hud_shield_pop_started_at;
 static settings_fade_t s_settings_fade;
 static uint8_t s_settings_mix;
 
@@ -425,6 +430,11 @@ static bool heart_effects_update(void)
         s_hud_heart_pop_active = false;
         changed = true;
     }
+    if (s_hud_shield_pop_active &&
+        s_game_time_s - s_hud_shield_pop_started_at >= duration) {
+        s_hud_shield_pop_active = false;
+        changed = true;
+    }
     return changed;
 }
 
@@ -500,11 +510,12 @@ static void game_reset(void)
     s_last_flash = 0;
     s_flash_until = 0;
     s_lives = MAX_LIVES;
-    s_has_shield = false;
+    s_has_shield = true;
     s_invincible_until = 0;
     s_heart_pickup_fx.active = false;
+    s_shield_pickup_fx.active = false;
     s_hud_heart_pop_active = false;
-    dust_reset();
+    s_hud_shield_pop_active = false;
     render_set_night_mix(0);
     scene_manager_reset(&s_scene);
     scenery_set_scene(SCENE_DESERT);
@@ -592,6 +603,20 @@ static void draw_heart_pickup_fx(void)
                          s_heart_pickup_fx.y - h / 2, w, h, OPACITY[stage]);
 }
 
+static void draw_shield_pickup_fx(void)
+{
+    if (!s_shield_pickup_fx.active) return;
+    float progress = (s_game_time_s - s_shield_pickup_fx.started_at) /
+                     (HEART_FX_MS / 1000.0f);
+    if (progress < 0) progress = 0;
+    if (progress >= 1.0f) return;
+    int w = OBS_HEART_BASE_W + (int)((32 - OBS_HEART_BASE_W) * progress + 0.5f);
+    int h = OBS_HEART_BASE_H + (int)((29 - OBS_HEART_BASE_H) * progress + 0.5f);
+    hud_draw_shield_scaled(s_shield_pickup_fx.x - w / 2,
+                           s_shield_pickup_fx.y - h / 2, w, h,
+                           RGB565(80, 210, 255));
+}
+
 static void draw_lives(void)
 {
     for (int i = 0; i < s_lives; i++) {
@@ -612,8 +637,23 @@ static void draw_lives(void)
         render_sprite_scaled_raw(&spr_heart, cx - w / 2, cy - h / 2 - lift,
                                  w, h, 255);
     }
-    if (s_has_shield)
-        hud_draw_shield(6 + s_lives * 15, 6, RGB565(235, 235, 255));
+    if (s_has_shield) {
+        int shield_x = 6 + s_lives * 15;
+        if (s_hud_shield_pop_active) {
+            float progress = (s_game_time_s - s_hud_shield_pop_started_at) /
+                             (HEART_FX_MS / 1000.0f);
+            if (progress < 0) progress = 0;
+            if (progress > 1) progress = 1;
+            int w = 13 - (int)(6.0f * progress + 0.5f);
+            int h = 12 - (int)(5.0f * progress + 0.5f);
+            int lift = (int)(16.0f * progress * (1.0f - progress) + 0.5f);
+            hud_draw_shield_scaled(shield_x + (13 - w) / 2,
+                                   6 + (12 - h) / 2 - lift, w, h,
+                                   RGB565(80, 210, 255));
+        } else {
+            hud_draw_shield(shield_x, 2, RGB565(80, 210, 255));
+        }
+    }
 }
 
 static void draw_frame(int refresh_start_y)
@@ -678,6 +718,7 @@ static void draw_frame(int refresh_start_y)
     scenery_draw_ground_front();
 
     draw_heart_pickup_fx();
+    draw_shield_pickup_fx();
 
     // 左上角红心(剩余生命)
     draw_lives();
@@ -961,24 +1002,24 @@ void game_run(void)
                     if (obstacles_type(hit) == OBS_SHIELD) {
                         obstacles_remove(hit);
                         s_has_shield = true;
-                    } else if (obstacles_type(hit) == OBS_HEART) {
-                        int heart_x, heart_y;
-                        obstacles_visual_center(hit, &heart_x, &heart_y);
-                        obstacles_remove(hit);
-                        if (s_lives < MAX_LIVES) {
-                            s_hud_heart_pop_index = s_lives;
-                            s_lives++;
-                            s_heart_pickup_fx = (heart_pickup_fx_t) {
-                                .active = true,
-                                .started_at = s_game_time_s,
-                                .x = heart_x,
-                                .y = heart_y,
-                            };
-                            s_hud_heart_pop_active = true;
-                            s_hud_heart_pop_started_at = s_game_time_s;
-                            sfx_play(SFX_HEART);
-                        }
-                    } else if (s_has_shield) {
+                        s_shield_pickup_fx = (shield_fx_t) {
+                            .active = true,
+                            .started_at = s_game_time_s,
+                            .x = (int)s_player.x,
+                            .y = (int)s_player.y - 10,
+                        };
+                        s_hud_shield_pop_active = true;
+                        s_hud_shield_pop_started_at = s_game_time_s;
+                        sfx_play(SFX_HEART);
+                    } else if (s_has_shield && !s_invincible_mode) {
+                        int shield_x, shield_y;
+                        obstacles_visual_center(hit, &shield_x, &shield_y);
+                        s_shield_pickup_fx = (shield_fx_t) {
+                            .active = true,
+                            .started_at = s_game_time_s,
+                            .x = shield_x,
+                            .y = shield_y,
+                        };
                         s_has_shield = false;
                         s_invincible_until = s_game_time_s + INVINCIBLE_MS / 1000.0f;
                         sfx_play(SFX_DEATH);
