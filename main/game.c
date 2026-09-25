@@ -970,16 +970,18 @@ void game_run(void)
             
             /*
              * 场景过渡触发逻辑：
-             * - 仅在 night_progress >= 0.5 (月亮正中) 且非过渡中、且本夜未切换时触发
+             * - 真正的月亮正中 = 夜晚分数段的中点 (NIGHT_SCORE_SPAN/2 = 250分)
+             * - 用 segment_score/NIGHT_SCORE_SPAN 计算夜晚进度，而非 day_cycle phase
+             * - day_cycle phase 在夜晚开始即达 1.0 并保持，不代表夜晚进度
+             * - 仅在 s_want_night 且 segment_score >= 250 且未切换时触发
              * - 4.5 秒三次方缓动过渡，避免与昼夜渐变叠加产生生硬跳变
              * - 每个夜晚仅切换一次，白天到来时重置标志
              */
-            float night_progress = day_cycle_night_progress(&s_day_cycle);
-            bool deepest_night = s_want_night && night_progress >= 0.5f;
+            bool deepest_night = s_want_night && segment_score >= (NIGHT_SCORE_SPAN / 2.0f);
             if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene) && !s_scene_switched_this_night) {
                 s_scene_switch_pending = true;
-                ESP_LOGI(TAG, "scene switch pending at deepest night: current=%d score=%d",
-                         (int)scene_manager_current(&s_scene), (int)s_score);
+                ESP_LOGI(TAG, "scene switch pending at deepest night (score=%.0f): current=%d",
+                         segment_score, (int)scene_manager_current(&s_scene));
             }
             
             /*
@@ -1224,9 +1226,9 @@ void game_run(void)
                     scenery_update_sky(sky_scroll_px);
                     sky_scroll_px = 0;
                     day_cycle_update(&s_day_cycle, s_want_night, sky_elapsed_s);
-                    float night_progress = day_cycle_night_progress(&s_day_cycle);
-                    bool deepest_night = s_want_night && night_progress >= 0.5f;
-                    if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene)) {
+                    float segment_score = s_score - s_cycle_segment_start;
+                    bool deepest_night = s_want_night && segment_score >= (NIGHT_SCORE_SPAN / 2.0f);
+                    if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene) && !s_scene_switched_this_night) {
                         s_scene_switch_pending = true;
                     }
                     if (s_scene_switch_pending && !scene_manager_transitioning(&s_scene)) {
