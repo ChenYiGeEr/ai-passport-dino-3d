@@ -118,6 +118,7 @@ static float s_speed;
 static bool s_want_night;
 static float s_cycle_segment_start;
 static bool s_scene_switch_pending;
+static bool s_scene_switched_this_night; // 本夜已完成场景切换
 static day_cycle_t s_day_cycle;
 static float s_game_time_s;
 static uint32_t s_last_flash; // 已提示到的整百
@@ -505,6 +506,7 @@ static void game_reset(void)
     s_want_night = false;
     s_cycle_segment_start = 0;
     s_scene_switch_pending = false;
+    s_scene_switched_this_night = false;
     day_cycle_reset(&s_day_cycle);
     s_game_time_s = 0;
     s_last_flash = 0;
@@ -948,30 +950,61 @@ void game_run(void)
             float segment_score = s_score - s_cycle_segment_start;
             float segment_limit = s_want_night ? NIGHT_SCORE_SPAN : DAY_SCORE_SPAN;
             if (segment_score >= segment_limit) {
+                bool was_night = s_want_night;
                 s_cycle_segment_start = s_score;
                 s_want_night = !s_want_night;
-                // 场景切换不再在昼夜边界触发，改为在夜晚中期推进（避免与昼夜渐变叠加）
+                /*
+                 * 黎明转场：夜晚结束 -> 白天，强制切回沙漠。
+                 * 同样使用 4.5 秒三次方缓动，与夜间过渡保持一致。
+                 * 只有当前不在沙漠时才触发（防止重复触发）。
+                 * 重置「本夜已切换」标志，下个夜晚可再次切换。
+                 */
+                if (was_night && !s_want_night) {
+                    s_scene_switched_this_night = false;
+                    if (s_scene.current != SCENE_DESERT) {
+                        scene_manager_begin(&s_scene, SCENE_DESERT);
+                    }
+                }
             }
             sky_elapsed_s += dt;
             
-            // 场景切换：在夜晚进度 35% 时触发，给 4.5 秒过渡时间完成于天亮前
+            /*
+             * 场景过渡触发逻辑：
+             * - 仅在 night_progress >= 0.5 (月亮正中) 且非过渡中、且本夜未切换时触发
+             * - 4.5 秒三次方缓动过渡，避免与昼夜渐变叠加产生生硬跳变
+             * - 每个夜晚仅切换一次，白天到来时重置标志
+             */
             float night_progress = day_cycle_night_progress(&s_day_cycle);
-            bool deepest_night = s_want_night && night_progress > 0.35f;
-            if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene)) {
+            bool deepest_night = s_want_night && night_progress >= 0.5f;
+            if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene) && !s_scene_switched_this_night) {
                 s_scene_switch_pending = true;
-                ESP_LOGI(TAG, "scene switch pending at night progress %.2f: current=%d score=%d",
-                         night_progress, (int)scene_manager_current(&s_scene), (int)s_score);
+                ESP_LOGI(TAG, "scene switch pending at deepest night: current=%d score=%d",
+                         (int)scene_manager_current(&s_scene), (int)s_score);
             }
             
-            // 开始场景过渡（选下一个场景）
+            /*
+             * 场景选择策略：
+             * - 当前是沙漠(白天)：随机选峡谷/绿洲/火山之一
+             * - 当前是夜景：在剩余两个夜景中随机选一个，绝不回沙漠、不重复当前
+             * - 游戏层控制选择，场景管理器只负责动画
+             */
             if (s_scene_switch_pending && !scene_manager_transitioning(&s_scene)) {
-                if (s_scene.bag_mask == ((1u << SCENE_COUNT) - 1u)) s_scene.bag_mask = 1u << s_scene.current;
-                scene_id_t pick = s_scene.current;
-                int choices[SCENE_COUNT], n = 0;
-                for (int i = 0; i < SCENE_COUNT; i++) if (!(s_scene.bag_mask & (1u << i)) && i != s_scene.current) choices[n++] = i;
-                if (n) pick = (scene_id_t)choices[rand() % n];
+                scene_id_t current = s_scene.current;
+                scene_id_t pick;
+                
+                if (current == SCENE_DESERT) {
+                    pick = (scene_id_t)(1 + rand() % 3);
+                } else {
+                    int choices[2];
+                    int n = 0;
+                    for (int i = 1; i <= 3; i++) {
+                        if (i != current) choices[n++] = i;
+                    }
+                    pick = (scene_id_t)choices[rand() % n];
+                }
                 scene_manager_begin(&s_scene, pick);
                 s_scene_switch_pending = false;
+                s_scene_switched_this_night = true; // 标记本夜已完成切换
             }
             
             if (scene_manager_transitioning(&s_scene)) {
@@ -1028,7 +1061,11 @@ void game_run(void)
                         s_hud_shield_pop_started_at = s_game_time_s;
                         sfx_play(SFX_HEART);
                     } else if (obstacles_type(hit) == OBS_HEART) {
-                        // 拾取红心：增加生命（上限 MAX_LIVES）
+                        /*
+                         * 红心拾取：不再扣命，改为加命(上限 3)。
+                         * 播放角色位置放大淡出特效 + HUD 红心弹跳动画。
+                         * 修复早期版本把 OBS_HEART 误判为伤害障碍的 Bug。
+                         */
                         obstacles_remove(hit);
                         if (s_lives < MAX_LIVES) {
                             s_lives++;
@@ -1044,6 +1081,10 @@ void game_run(void)
                         }
                         sfx_play(SFX_HEART);
                     } else if (s_has_shield && !s_invincible_mode) {
+                        /*
+                         * 持有护盾时撞击：消耗护盾代替扣命，触发 1.5s 无敌。
+                         * 播放护盾破碎特效(在障碍位置)而非心碎特效。
+                         */
                         int shield_x, shield_y;
                         obstacles_visual_center(hit, &shield_x, &shield_y);
                         s_shield_pickup_fx = (shield_fx_t) {
@@ -1184,16 +1225,23 @@ void game_run(void)
                     sky_scroll_px = 0;
                     day_cycle_update(&s_day_cycle, s_want_night, sky_elapsed_s);
                     float night_progress = day_cycle_night_progress(&s_day_cycle);
-                    bool deepest_night = s_want_night && night_progress > 0.35f;
+                    bool deepest_night = s_want_night && night_progress >= 0.5f;
                     if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene)) {
                         s_scene_switch_pending = true;
                     }
                     if (s_scene_switch_pending && !scene_manager_transitioning(&s_scene)) {
-                        if (s_scene.bag_mask == ((1u << SCENE_COUNT) - 1u)) s_scene.bag_mask = 1u << s_scene.current;
-                        scene_id_t pick = s_scene.current;
-                        int choices[SCENE_COUNT], n = 0;
-                        for (int i = 0; i < SCENE_COUNT; i++) if (!(s_scene.bag_mask & (1u << i)) && i != s_scene.current) choices[n++] = i;
-                        if (n) pick = (scene_id_t)choices[rand() % n];
+                        scene_id_t current = s_scene.current;
+                        scene_id_t pick;
+                        if (current == SCENE_DESERT) {
+                            pick = (scene_id_t)(1 + rand() % 3);
+                        } else {
+                            int choices[2];
+                            int n = 0;
+                            for (int i = 1; i <= 3; i++) {
+                                if (i != current) choices[n++] = i;
+                            }
+                            pick = (scene_id_t)choices[rand() % n];
+                        }
                         scene_manager_begin(&s_scene, pick);
                         s_scene_switch_pending = false;
                     }

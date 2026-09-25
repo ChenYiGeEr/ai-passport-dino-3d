@@ -73,9 +73,22 @@ void scene_manager_update(scene_manager_t *m, float dt, bool blocked) {
     }
 }
 
-static float ease_in_out_cubic(float t) { return t < 0.5f ? 4.0f * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f; }
+/*
+ * 三次方缓动函数：缓入缓出，视觉更自然。
+ * t ∈ [0,1]：前半段加速、后半段减速，避免线性插值的机械感。
+ */
+static float ease_in_out_cubic(float t)
+{
+    return t < 0.5f ? 4.0f * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+}
 
-float scene_manager_mix(const scene_manager_t *m) {
+/*
+ * 返回当前场景过渡的混合因子 [0,1]。
+ * 非过渡期恒返 0；过渡期按已用时间 / 总时长 取线性进度，再套缓动。
+ * 供渲染器按层逐像素插值两套调色板。
+ */
+float scene_manager_mix(const scene_manager_t *m)
+{
     if (!m->transitioning) return 0.0f;
     float linear = m->transition_s / SCENE_TRANSITION_S;
     if (linear > 1.0f) linear = 1.0f;
