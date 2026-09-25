@@ -510,7 +510,7 @@ static void game_reset(void)
     s_last_flash = 0;
     s_flash_until = 0;
     s_lives = MAX_LIVES;
-    s_has_shield = true;
+    s_has_shield = false;
     s_invincible_until = 0;
     s_heart_pickup_fx.active = false;
     s_shield_pickup_fx.active = false;
@@ -1010,6 +1010,22 @@ void game_run(void)
                         };
                         s_hud_shield_pop_active = true;
                         s_hud_shield_pop_started_at = s_game_time_s;
+                        sfx_play(SFX_HEART);
+                    } else if (obstacles_type(hit) == OBS_HEART) {
+                        // 拾取红心：增加生命（上限 MAX_LIVES）
+                        obstacles_remove(hit);
+                        if (s_lives < MAX_LIVES) {
+                            s_lives++;
+                            s_heart_pickup_fx = (heart_pickup_fx_t) {
+                                .active = true,
+                                .started_at = s_game_time_s,
+                                .x = (int)s_player.x,
+                                .y = (int)s_player.y - 10,
+                            };
+                            s_hud_heart_pop_active = true;
+                            s_hud_heart_pop_index = s_lives - 1;
+                            s_hud_heart_pop_started_at = s_game_time_s;
+                        }
                         sfx_play(SFX_HEART);
                     } else if (s_has_shield && !s_invincible_mode) {
                         int shield_x, shield_y;
