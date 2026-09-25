@@ -953,6 +953,8 @@ void game_run(void)
                 bool was_night = s_want_night;
                 s_cycle_segment_start = s_score;
                 s_want_night = !s_want_night;
+                /* 关键：转场后必须重新计算 segment_score，否则下面的 deepest_night 判定会用到旧值 */
+                segment_score = s_score - s_cycle_segment_start; // 此时为 0
                 /*
                  * 黎明转场：夜晚结束 -> 白天，强制切回沙漠。
                  * 同样使用 4.5 秒三次方缓动，与夜间过渡保持一致。
