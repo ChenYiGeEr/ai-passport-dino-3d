@@ -948,18 +948,34 @@ void game_run(void)
             float segment_score = s_score - s_cycle_segment_start;
             float segment_limit = s_want_night ? NIGHT_SCORE_SPAN : DAY_SCORE_SPAN;
             if (segment_score >= segment_limit) {
-                bool was_night = s_want_night;
                 s_cycle_segment_start = s_score;
                 s_want_night = !s_want_night;
-                if (was_night && !s_want_night) {
-                    s_scene_switch_pending = true;
-                    ESP_LOGI(TAG, "scene switch pending: current=%d score=%d",
-                             (int)scene_manager_current(&s_scene), (int)s_score);
-                }
+                // 场景切换不再在昼夜边界触发，改为在夜晚中期推进（避免与昼夜渐变叠加）
             }
             sky_elapsed_s += dt;
+            
+            // 场景切换：在夜晚进度 35% 时触发，给 4.5 秒过渡时间完成于天亮前
+            float night_progress = day_cycle_night_progress(&s_day_cycle);
+            bool deepest_night = s_want_night && night_progress > 0.35f;
+            if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene)) {
+                s_scene_switch_pending = true;
+                ESP_LOGI(TAG, "scene switch pending at night progress %.2f: current=%d score=%d",
+                         night_progress, (int)scene_manager_current(&s_scene), (int)s_score);
+            }
+            
+            // 开始场景过渡（选下一个场景）
+            if (s_scene_switch_pending && !scene_manager_transitioning(&s_scene)) {
+                if (s_scene.bag_mask == ((1u << SCENE_COUNT) - 1u)) s_scene.bag_mask = 1u << s_scene.current;
+                scene_id_t pick = s_scene.current;
+                int choices[SCENE_COUNT], n = 0;
+                for (int i = 0; i < SCENE_COUNT; i++) if (!(s_scene.bag_mask & (1u << i)) && i != s_scene.current) choices[n++] = i;
+                if (n) pick = (scene_id_t)choices[rand() % n];
+                scene_manager_begin(&s_scene, pick);
+                s_scene_switch_pending = false;
+            }
+            
             if (scene_manager_transitioning(&s_scene)) {
-                scene_manager_update(&s_scene, dt, false, false);
+                scene_manager_update(&s_scene, dt, false);
                 render_set_scene_mix(scene_manager_current(&s_scene),
                                      scene_manager_next(&s_scene),
                                      (uint8_t)(scene_manager_mix(&s_scene) * 255.0f + 0.5f));
@@ -1167,9 +1183,21 @@ void game_run(void)
                     scenery_update_sky(sky_scroll_px);
                     sky_scroll_px = 0;
                     day_cycle_update(&s_day_cycle, s_want_night, sky_elapsed_s);
-                    scene_manager_update(&s_scene, 0,
-                                         s_scene_switch_pending, false);
-                    s_scene_switch_pending = false;
+                    float night_progress = day_cycle_night_progress(&s_day_cycle);
+                    bool deepest_night = s_want_night && night_progress > 0.35f;
+                    if (!s_scene_switch_pending && deepest_night && !scene_manager_transitioning(&s_scene)) {
+                        s_scene_switch_pending = true;
+                    }
+                    if (s_scene_switch_pending && !scene_manager_transitioning(&s_scene)) {
+                        if (s_scene.bag_mask == ((1u << SCENE_COUNT) - 1u)) s_scene.bag_mask = 1u << s_scene.current;
+                        scene_id_t pick = s_scene.current;
+                        int choices[SCENE_COUNT], n = 0;
+                        for (int i = 0; i < SCENE_COUNT; i++) if (!(s_scene.bag_mask & (1u << i)) && i != s_scene.current) choices[n++] = i;
+                        if (n) pick = (scene_id_t)choices[rand() % n];
+                        scene_manager_begin(&s_scene, pick);
+                        s_scene_switch_pending = false;
+                    }
+                    scene_manager_update(&s_scene, 0, false);
                     sky_elapsed_s = 0;
                     render_set_night_mix(day_cycle_night_mix(&s_day_cycle));
                     render_set_scene_mix(scene_manager_current(&s_scene),

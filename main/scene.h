@@ -21,8 +21,7 @@ typedef struct {
 } scene_manager_t;
 
 void scene_manager_reset(scene_manager_t *m);
-void scene_manager_update(scene_manager_t *m, float dt, bool deepest_night,
-                          bool blocked);
+void scene_manager_update(scene_manager_t *m, float dt, bool blocked);
 void scene_manager_begin(scene_manager_t *m, scene_id_t next);
 float scene_manager_mix(const scene_manager_t *m);
 scene_id_t scene_manager_current(const scene_manager_t *m);
@@ -31,7 +30,7 @@ bool scene_manager_transitioning(const scene_manager_t *m);
 uint16_t scene_color(scene_id_t scene, int layer, int stage);
 void scene_sprite_tint(scene_id_t scene, uint8_t *r, uint8_t *g, uint8_t *b);
 
-#define SCENE_TRANSITION_S 2.0f
+#define SCENE_TRANSITION_S 4.5f
 #define SCENE_LAYER_SKY 0
 #define SCENE_LAYER_FAR 1
 #define SCENE_LAYER_RIVER 2

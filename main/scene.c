@@ -60,29 +60,27 @@ void scene_manager_begin(scene_manager_t *m, scene_id_t next) {
     ESP_LOGI("scene", "scene transition begin: %d -> %d", (int)m->current, (int)next);
 }
 
-void scene_manager_update(scene_manager_t *m, float dt, bool deepest_night, bool blocked) {
-    if (!deepest_night) m->night_latched = false;
+void scene_manager_update(scene_manager_t *m, float dt, bool blocked) {
+    (void)blocked;
     if (m->transitioning) {
-        if (!blocked && dt > 0) m->transition_s += dt;
+        if (dt > 0) m->transition_s += dt;
         if (m->transition_s >= SCENE_TRANSITION_S) {
             scene_id_t prev = m->current;
             m->current = m->next; m->transitioning = false;
             m->transition_s = 0; m->bag_mask |= 1u << m->current;
             ESP_LOGI("scene", "scene switched: %d -> %d", (int)prev, (int)m->current);
         }
-        return;
     }
-    if (!deepest_night || blocked || m->night_latched) return;
-    m->night_latched = true;
-    if (m->bag_mask == ((1u << SCENE_COUNT) - 1u)) m->bag_mask = 1u << m->current;
-    scene_id_t pick = m->current;
-    int choices[SCENE_COUNT], n = 0;
-    for (int i = 0; i < SCENE_COUNT; i++) if (!(m->bag_mask & (1u << i)) && i != m->current) choices[n++] = i;
-    if (n) pick = (scene_id_t)choices[rand() % n];
-    scene_manager_begin(m, pick);
 }
 
-float scene_manager_mix(const scene_manager_t *m) { return m->transitioning ? m->transition_s / SCENE_TRANSITION_S : 0.0f; }
+static float ease_in_out_cubic(float t) { return t < 0.5f ? 4.0f * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f; }
+
+float scene_manager_mix(const scene_manager_t *m) {
+    if (!m->transitioning) return 0.0f;
+    float linear = m->transition_s / SCENE_TRANSITION_S;
+    if (linear > 1.0f) linear = 1.0f;
+    return ease_in_out_cubic(linear);
+}
 scene_id_t scene_manager_current(const scene_manager_t *m) { return m->current; }
 scene_id_t scene_manager_next(const scene_manager_t *m) { return m->next; }
 bool scene_manager_transitioning(const scene_manager_t *m) { return m->transitioning; }
